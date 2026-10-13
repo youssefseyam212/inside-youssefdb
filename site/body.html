@@ -10,10 +10,10 @@
   </symbol></defs></svg>
 
 <div class="wrap">
-  <header>
-    <div class="brand"><svg width="36" height="36" aria-hidden="true"><use href="#mark"/></svg><b>youssef<span>db</span></b></div>
-    <p class="tagline">Watch a NoSQL database work. Run a query, then follow your data from your code into memory, into BSON bytes, and onto disk.</p>
-    <span class="pill" id="ver">real youssefdb, running in your browser</span>
+  <header class="hero">
+    <div class="brand"><svg width="32" height="32" aria-hidden="true"><use href="#mark"/></svg><b>youssef<span>db</span></b></div>
+    <h1>See how a database stores and finds your data, step by step</h1>
+    <p class="lede">For developers learning how NoSQL databases work. Run a query and watch the real youssefdb package read its file, work in memory, encode the data as BSON and save it to disk. Everything runs in your browser.</p>
   </header>
 
   <section class="panel flow" aria-label="How your data moves">
@@ -32,26 +32,29 @@
         <button type="button" id="prev">Back</button>
         <button type="button" id="play" class="primary">Play</button>
         <button type="button" id="next">Next</button>
+        <div class="speed" role="group" aria-label="Playback speed">
+          <button type="button" data-speed="0.25" aria-pressed="false">0.25x</button>
+          <button type="button" data-speed="0.5" aria-pressed="false">0.5x</button>
+          <button type="button" data-speed="1" aria-pressed="true">1x</button>
+          <button type="button" data-speed="2" aria-pressed="false">2x</button>
+        </div>
         <span class="count" id="flowcount"></span>
       </div>
       <div class="progress"><span id="flowbar"></span></div>
     </div>
   </section>
 
-  <div class="top">
-    <aside class="panel lessons">
-      <h2>Lessons</h2>
-      <ol id="lessons"></ol>
-    </aside>
-
-    <main class="panel">
+  <div class="work">
+    <main class="panel lesson-panel">
+      <nav aria-label="Lessons"><ol id="lessons" class="lesson-list"></ol></nav>
       <h2 id="ltitle">Lesson</h2>
       <div class="explain" id="explain"></div>
-      <label for="code" class="hint">Your code · <code>users</code> = <code>db.collection('users')</code></label>
+      <label for="code" class="hint">Your code · get a collection first: <code>const admin = db.collection('admin')</code>, then <code>admin.insertOne(…)</code></label>
       <textarea id="code" spellcheck="false" autocomplete="off"></textarea>
       <div class="bar">
         <button type="button" class="run" id="run">Run</button>
         <button type="button" id="reset">Reset data</button>
+        <button type="button" id="download">Download data</button>
         <span class="hint">Ctrl + Enter</span>
       </div>
       <pre class="result" id="result" aria-live="polite"></pre>
@@ -64,23 +67,28 @@
     </section>
   </div>
 
-  <div class="bottom">
-    <section class="panel disk">
-      <h2>1 · Disk</h2>
+  <section class="inspect" aria-labelledby="inspect-title">
+    <div class="inspect-head">
+      <h2 id="inspect-title" class="section-title">Look closer</h2>
+      <p class="sub">Click a file, a document or a byte to see what it holds.</p>
+    </div>
+    <div class="bottom">
+    <section class="panel files">
+      <h3>Files on disk</h3>
       <p class="sub">A database is a folder. Each collection is one file.</p>
       <div class="tree" id="tree"></div>
       <p class="diskinfo" id="diskinfo"></p>
     </section>
 
     <section class="panel">
-      <h2>2 · Memory <span class="where" id="memwhere"></span></h2>
+      <h3>Documents in memory <span class="where" id="memwhere"></span></h3>
       <p class="sub" id="memsub">When youssefdb opens a file, it turns the bytes back into a JavaScript array. Click a document.</p>
       <div id="oid"></div>
       <div class="docs" id="docs"></div>
     </section>
 
     <section class="panel">
-      <h2>3 · Bytes <span class="where" id="byteswhere"></span></h2>
+      <h3>Bytes in the file <span class="where" id="byteswhere"></span></h3>
       <div class="caption" id="caption">Point at any byte to see what it means.</div>
       <div class="keys">
         <span style="--sw:var(--seg-len)">length</span><span style="--sw:var(--seg-type)">type</span><span style="--sw:var(--seg-key)">field name</span><span style="--sw:var(--seg-val)">value</span><span style="--sw:var(--seg-oid)">ObjectId</span><span style="--sw:var(--seg-end)">end marker</span>
@@ -88,5 +96,8 @@
       <div class="hexwrap" id="hexwrap"><div class="hex" id="hex"></div></div>
       <button type="button" class="more" id="more" hidden>Show all bytes</button>
     </section>
-  </div>
+    </div>
+  </section>
+
+{{FOOTER}}
 </div>
