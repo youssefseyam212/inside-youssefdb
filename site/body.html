@@ -1,0 +1,92 @@
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="mark" viewBox="0 0 64 64">
+    <rect x="22" y="6" width="32" height="40" rx="3.5" fill="#4f9ea3" opacity=".5"/>
+    <rect x="16" y="12" width="32" height="40" rx="3.5" fill="#4f9ea3"/>
+    <path d="M13.5 18H33l9 9v30.5a3.5 3.5 0 0 1-3.5 3.5h-25a3.5 3.5 0 0 1-3.5-3.5v-36A3.5 3.5 0 0 1 13.5 18z" fill="#1d5c63"/>
+    <path d="M33 18v5.5a3.5 3.5 0 0 0 3.5 3.5H42z" fill="#4f9ea3"/>
+    <rect x="15" y="32" width="5" height="5" rx="1" fill="#f0a03c"/><rect x="23" y="32" width="13" height="5" rx="2.5" fill="#e9f2f1"/>
+    <rect x="15" y="41" width="5" height="5" rx="1" fill="#e9f2f1"/><rect x="23" y="41" width="15" height="5" rx="2.5" fill="#e9f2f1"/>
+    <rect x="15" y="50" width="5" height="5" rx="1" fill="#e9f2f1"/><rect x="23" y="50" width="9" height="5" rx="2.5" fill="#e9f2f1"/>
+  </symbol></defs></svg>
+
+<div class="wrap">
+  <header>
+    <div class="brand"><svg width="36" height="36" aria-hidden="true"><use href="#mark"/></svg><b>youssef<span>db</span></b></div>
+    <p class="tagline">Watch a NoSQL database work. Run a query, then follow your data from your code into memory, into BSON bytes, and onto disk.</p>
+    <span class="pill" id="ver">real youssefdb, running in your browser</span>
+  </header>
+
+  <section class="panel flow" aria-label="How your data moves">
+    <div class="stage">
+      <div class="station" id="st-code"><h3><span class="ico">JS</span>Your code</h3><div class="sb" id="sb-code"></div></div>
+      <div class="pipe" id="p1"><span class="line"></span><span class="pkt"></span></div>
+      <div class="station" id="st-mem"><h3><span class="ico mem">RAM</span>Memory</h3><div class="sb" id="sb-mem"></div></div>
+      <div class="pipe" id="p2"><span class="line"></span><span class="pkt"></span></div>
+      <div class="station" id="st-enc"><h3><span class="ico enc">BSON</span>Encoder</h3><div class="sb" id="sb-enc"></div></div>
+      <div class="pipe" id="p3"><span class="line"></span><span class="pkt"></span></div>
+      <div class="station" id="st-disk"><h3><span class="ico disk">DISK</span>Disk</h3><div class="sb" id="sb-disk"></div></div>
+    </div>
+    <div class="flowfoot">
+      <p class="flowcap" id="flowcap" aria-live="polite"></p>
+      <div class="controls">
+        <button type="button" id="prev">Back</button>
+        <button type="button" id="play" class="primary">Play</button>
+        <button type="button" id="next">Next</button>
+        <span class="count" id="flowcount"></span>
+      </div>
+      <div class="progress"><span id="flowbar"></span></div>
+    </div>
+  </section>
+
+  <div class="top">
+    <aside class="panel lessons">
+      <h2>Lessons</h2>
+      <ol id="lessons"></ol>
+    </aside>
+
+    <main class="panel">
+      <h2 id="ltitle">Lesson</h2>
+      <div class="explain" id="explain"></div>
+      <label for="code" class="hint">Your code · <code>users</code> = <code>db.collection('users')</code></label>
+      <textarea id="code" spellcheck="false" autocomplete="off"></textarea>
+      <div class="bar">
+        <button type="button" class="run" id="run">Run</button>
+        <button type="button" id="reset">Reset data</button>
+        <span class="hint">Ctrl + Enter</span>
+      </div>
+      <pre class="result" id="result" aria-live="polite"></pre>
+    </main>
+
+    <section class="panel">
+      <h2>What just happened</h2>
+      <p class="sub">Every step youssefdb took, in order. Click a disk step to see those exact bytes.</p>
+      <ol class="steps" id="steps"></ol>
+    </section>
+  </div>
+
+  <div class="bottom">
+    <section class="panel disk">
+      <h2>1 · Disk</h2>
+      <p class="sub">A database is a folder. Each collection is one file.</p>
+      <div class="tree" id="tree"></div>
+      <p class="diskinfo" id="diskinfo"></p>
+    </section>
+
+    <section class="panel">
+      <h2>2 · Memory <span class="where" id="memwhere"></span></h2>
+      <p class="sub" id="memsub">When youssefdb opens a file, it turns the bytes back into a JavaScript array. Click a document.</p>
+      <div id="oid"></div>
+      <div class="docs" id="docs"></div>
+    </section>
+
+    <section class="panel">
+      <h2>3 · Bytes <span class="where" id="byteswhere"></span></h2>
+      <div class="caption" id="caption">Point at any byte to see what it means.</div>
+      <div class="keys">
+        <span style="--sw:var(--seg-len)">length</span><span style="--sw:var(--seg-type)">type</span><span style="--sw:var(--seg-key)">field name</span><span style="--sw:var(--seg-val)">value</span><span style="--sw:var(--seg-oid)">ObjectId</span><span style="--sw:var(--seg-end)">end marker</span>
+      </div>
+      <div class="hexwrap" id="hexwrap"><div class="hex" id="hex"></div></div>
+      <button type="button" class="more" id="more" hidden>Show all bytes</button>
+    </section>
+  </div>
+</div>
