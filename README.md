@@ -31,4 +31,4 @@ Requires Node 18+. It installs the latest youssefdb from npm, so rebuild after e
 
 ## Status
 
-Private while in progress. See `PROJECT_NOTES.md` for the full project notes and to-do list.
+Live at https://youssefseyam212.github.io/inside-youssefdb/ (GitHub Pages, served from `docs/`). See `PROJECT_NOTES.md` for the full project notes and to-do list.
