@@ -1,0 +1,1072 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Watch a NoSQL database work: the real youssefdb running in your browser, from code to memory to BSON bytes to disk.">
+<title>Inside youssefdb</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+/* Layout: workbench. Top row: lessons | code | step timeline. Bottom row: the three places data lives — disk, memory, bytes. */
+:root{
+  --bg:#f2f5f5; --panel:#ffffff; --sunk:#eef3f3; --ink:#132326; --muted:#5a6b6e; --line:#d5dcdd;
+  --teal:#1d5c63; --teal-2:#4f9ea3; --bar:#e9f2f1; --amber:#f0a03c; --amber-ink:#2b1a00;
+  --t-str:#1f7a4d; --t-num:#2457a6; --t-bool:#8a3fa0; --t-null:#7a6f66; --t-oid:#b25a00; --t-date:#a3366a;
+  --seg-len:#e4e8ea; --seg-type:#cfe7e6; --seg-key:#dde6f6; --seg-val:#fbe7c8; --seg-oid:#f8d4b0; --seg-end:#eceae6;
+  --new:#d9f2e3; --chg:#fde7c4; --del:#f6dcdc; --hit:#dbe9fb; --focus:#1d5c63;
+  --sans:"IBM Plex Sans",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0b1416; --panel:#132024; --sunk:#0f1a1d; --ink:#e4eeef; --muted:#93a7aa; --line:#25383c;
+  --teal:#3f8f95; --teal-2:#86c6c8; --bar:#1b2b2f;
+  --t-str:#6fd39b; --t-num:#8db6ff; --t-bool:#d39bf0; --t-null:#a9a39c; --t-oid:#ffb066; --t-date:#f08bbd;
+  --seg-len:#1f2a2d; --seg-type:#17393b; --seg-key:#1d2a44; --seg-val:#3d2f17; --seg-oid:#4a2c12; --seg-end:#262422;
+  --new:#173828; --chg:#3d2f12; --del:#3e1d1d; --hit:#17304d; --focus:#86c6c8; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0b1416; --panel:#132024; --sunk:#0f1a1d; --ink:#e4eeef; --muted:#93a7aa; --line:#25383c;
+  --teal:#3f8f95; --teal-2:#86c6c8; --bar:#1b2b2f;
+  --t-str:#6fd39b; --t-num:#8db6ff; --t-bool:#d39bf0; --t-null:#a9a39c; --t-oid:#ffb066; --t-date:#f08bbd;
+  --seg-len:#1f2a2d; --seg-type:#17393b; --seg-key:#1d2a44; --seg-val:#3d2f17; --seg-oid:#4a2c12; --seg-end:#262422;
+  --new:#173828; --chg:#3d2f12; --del:#3e1d1d; --hit:#17304d; --focus:#86c6c8; color-scheme:dark }
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55}
+.wrap{max-width:1440px;margin:0 auto;padding-inline:16px;padding-block:18px 48px;display:flex;flex-direction:column;gap:14px}
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px}
+.brand b{font-family:var(--mono);font-size:1.4rem;letter-spacing:-.03em}
+.brand b span{color:var(--amber)}
+.tagline{margin:0;color:var(--muted);flex:1;min-width:240px;max-width:70ch}
+.pill{font-family:var(--mono);font-size:.72rem;border:1px solid var(--line);border-radius:999px;padding:2px 10px;color:var(--muted);white-space:nowrap}
+
+.top{display:grid;grid-template-columns:minmax(0,230px) minmax(0,1.15fr) minmax(0,1fr);gap:14px;align-items:start}
+.bottom{display:grid;grid-template-columns:minmax(0,230px) minmax(0,1fr) minmax(0,1.15fr);gap:14px;align-items:start}
+@media (max-width:1150px){.top,.bottom{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.lessons,.disk{grid-column:1/-1}}
+@media (max-width:720px){.top,.bottom{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px;min-width:0}
+h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:0;font-weight:600;display:flex;align-items:center;gap:8px}
+h2 .where{font-family:var(--mono);text-transform:none;letter-spacing:0;font-weight:500;color:var(--ink);background:var(--sunk);border-radius:4px;padding:0 6px}
+.sub{margin:0;color:var(--muted);font-size:.85rem}
+button{font:inherit;cursor:pointer;border-radius:5px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 12px}
+button:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+code{font-family:var(--mono);font-size:.86em;background:var(--sunk);padding:0 4px;border-radius:3px}
+
+/* lessons */
+.lessons ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+@media (max-width:1150px) and (min-width:721px){.lessons ol{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}}
+.lesson{width:100%;text-align:start;display:flex;flex-direction:column;gap:1px;padding:8px 10px}
+.lesson[aria-current="true"]{border-color:var(--teal);background:var(--sunk)}
+.lesson .n{font-family:var(--mono);font-size:.7rem;color:var(--teal)}
+.lesson .t{font-weight:600;font-size:.9rem}
+
+/* code */
+.explain{background:var(--sunk);border-radius:6px;padding:10px 12px;font-size:.92rem}
+.explain p{margin:0 0 6px}.explain p:last-child{margin:0}
+textarea{font-family:var(--mono);font-size:.88rem;color:var(--ink);background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:10px 12px;width:100%;min-height:96px;resize:vertical;line-height:1.5}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.run{background:var(--amber);border-color:var(--amber);color:var(--amber-ink);font-weight:600}
+.hint{font-family:var(--mono);font-size:.74rem;color:var(--muted)}
+pre.result{margin:0;font-family:var(--mono);font-size:.8rem;background:var(--sunk);border-radius:6px;padding:10px 12px;max-height:180px;overflow:auto;white-space:pre}
+pre.result.err{color:#b42318}
+
+/* timeline */
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;max-height:430px;overflow:auto}
+.step{display:grid;grid-template-columns:40px minmax(0,1fr);gap:10px;padding:7px 4px;border-radius:6px;cursor:default}
+.step[data-has-bytes]{cursor:pointer}
+.step[data-has-bytes]:hover{background:var(--sunk)}
+.step[aria-selected="true"]{background:var(--hit)}
+.step .ic{width:40px;height:24px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.64rem;letter-spacing:.04em;font-weight:700;background:var(--bar);color:var(--teal)}
+.step .ic.disk{background:var(--teal);color:#fff}
+.step .ic.mem{background:var(--amber);color:var(--amber-ink)}
+.step .ic.call{background:var(--ink);color:var(--panel)}
+.step .tt{font-size:.9rem}
+.step .dd{font-family:var(--mono);font-size:.74rem;color:var(--muted);overflow-wrap:anywhere}
+.step.call{margin-top:6px;border-top:1px dashed var(--line);padding-top:10px}
+.step.call:first-child{margin-top:0;border-top:0;padding-top:7px}
+.empty{color:var(--muted);font-size:.9rem;margin:0}
+
+/* disk */
+.tree{font-family:var(--mono);font-size:.84rem;display:flex;flex-direction:column;gap:2px}
+.tree .dir{color:var(--muted);padding:2px 0}
+.tree .file{margin-inline-start:12px;width:calc(100% - 12px)}
+.file{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:start;padding:5px 8px;border-radius:5px;border:1px solid transparent;background:none;font-family:var(--mono);font-size:.82rem}
+.file:hover{background:var(--sunk)}
+.file[aria-pressed="true"]{border-color:var(--teal);background:var(--sunk)}
+.file .sz{color:var(--muted);font-variant-numeric:tabular-nums}
+.file.flash{animation:flash 1.2s ease-out}
+@keyframes flash{from{background:var(--chg)}to{background:transparent}}
+.diskinfo{font-size:.84rem;color:var(--muted);margin:0}
+
+/* memory */
+.memhead{font-family:var(--mono);font-size:.82rem;color:var(--muted)}
+.docs{display:flex;flex-direction:column;gap:8px;max-height:520px;overflow:auto;padding:2px}
+.doc{border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:.8rem;cursor:pointer;background:var(--panel);position:relative}
+.doc:hover{border-color:var(--teal-2)}
+.doc[aria-selected="true"]{border-color:var(--teal);box-shadow:0 0 0 1px var(--teal)}
+.doc .idx{position:absolute;top:6px;inset-inline-end:8px;font-size:.68rem;color:var(--muted)}
+.doc .tag{font-family:var(--sans);font-size:.68rem;font-weight:600;border-radius:3px;padding:0 6px;margin-inline-start:6px}
+.doc.new{background:var(--new)}.doc.new .tag{background:var(--t-str);color:#fff}
+.doc.chg .tag{background:var(--amber);color:var(--amber-ink)}
+.doc.del{background:var(--del);opacity:.75;text-decoration:line-through}.doc.del .tag{background:#b42318;color:#fff}
+.doc.hit{background:var(--hit)}.doc.hit .tag{background:var(--teal);color:#fff}
+.kv{display:block;padding-inline-start:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.kv.changed{background:var(--chg);border-radius:3px}
+.k{color:var(--ink)}
+.v-str{color:var(--t-str)}.v-num{color:var(--t-num)}.v-bool{color:var(--t-bool)}.v-null{color:var(--t-null)}.v-oid{color:var(--t-oid)}.v-date{color:var(--t-date)}
+.brace{color:var(--muted)}
+.idxview{font-family:var(--mono);font-size:.8rem;display:flex;flex-direction:column;gap:6px}
+.idxview .row{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+.idxview .pos{background:var(--sunk);border-radius:3px;padding:0 5px}
+
+/* object id */
+.oid{border:1px dashed var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px}
+.oid .bytes{display:flex;gap:3px;flex-wrap:wrap}
+.oid .b{font-family:var(--mono);font-size:.78rem;width:26px;text-align:center;border-radius:3px;padding:2px 0}
+.oid .b.ts{background:var(--seg-type)}.oid .b.rnd{background:var(--seg-key)}.oid .b.cnt{background:var(--seg-val)}
+.oid .legend{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;font-size:.8rem}
+@media (max-width:500px){.oid .legend{grid-template-columns:minmax(0,1fr)}}
+.oid .legend div{border-top:3px solid;padding-top:4px}
+.oid .legend .ts{border-color:var(--teal-2)}.oid .legend .rnd{border-color:#7e9ad8}.oid .legend .cnt{border-color:var(--amber)}
+.oid .legend b{display:block;font-family:var(--mono);font-size:.78rem}
+
+/* bytes */
+.caption{min-height:44px;background:var(--sunk);border-radius:6px;padding:7px 10px;font-size:.86rem}
+.caption .r{font-family:var(--mono);font-size:.74rem;color:var(--muted)}
+.hexwrap{overflow:auto;max-height:470px;border:1px solid var(--line);border-radius:6px}
+.hex{font-family:var(--mono);font-size:.76rem;line-height:1.7;padding:8px 10px;min-width:max-content}
+.hex .row{display:flex;gap:10px;white-space:pre}
+.hex .off{color:var(--muted);width:4ch}
+.hex .cells{display:flex}
+.hex .c{width:2.6ch;text-align:center;border-radius:2px;cursor:default}
+.hex .a{width:1.15ch;text-align:center}
+.hex .ascii{display:flex;color:var(--muted)}
+.s-len{background:var(--seg-len)}.s-type{background:var(--seg-type)}.s-key{background:var(--seg-key)}.s-val{background:var(--seg-val)}.s-oid{background:var(--seg-oid)}.s-end{background:var(--seg-end)}
+.hex .on{outline:1.5px solid var(--ink);outline-offset:-1px}
+.hex .indoc{box-shadow:inset 0 -2px 0 var(--teal)}
+.keys{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:.76rem;color:var(--muted)}
+.keys span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-inline-end:5px;vertical-align:-1px;background:var(--sw)}
+.more{align-self:flex-start;font-size:.8rem}
+@media (prefers-reduced-motion: reduce){.file.flash{animation:none}}
+@media (max-width:720px){
+  .lessons ol{flex-direction:row;overflow-x:auto;padding-bottom:4px;scroll-snap-type:x proximity}
+  .lessons li{flex:0 0 auto;scroll-snap-align:start}
+  .lesson{min-width:150px}
+}
+
+/* ---------- animated flow ---------- */
+.flow{gap:14px}
+.stage{display:grid;grid-template-columns:minmax(0,1fr) 64px minmax(0,1.35fr) 64px minmax(0,1.2fr) 64px minmax(0,1.15fr);align-items:stretch}
+.station{border:1.5px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;min-width:0;min-height:190px;background:var(--panel);transition:border-color .3s,box-shadow .3s,transform .3s}
+.station h3{margin:0;font-size:.82rem;font-weight:600;display:flex;align-items:center;gap:8px}
+.station .ico{font-family:var(--mono);font-size:.62rem;font-weight:700;letter-spacing:.04em;border-radius:4px;padding:2px 6px;background:var(--ink);color:var(--panel)}
+.station .ico.mem{background:var(--amber);color:var(--amber-ink)}
+.station .ico.enc{background:var(--teal-2);color:#0f1c1f}
+.station .ico.disk{background:var(--teal);color:#fff}
+.station.active{border-color:var(--teal);box-shadow:0 0 0 3px color-mix(in srgb,var(--teal) 22%,transparent);transform:translateY(-2px)}
+.station.bad.active{border-color:#b42318;box-shadow:0 0 0 3px color-mix(in srgb,#b42318 22%,transparent)}
+.sb{display:flex;flex-direction:column;gap:8px;min-width:0;font-size:.84rem}
+.idle{margin:0;color:var(--muted);font-size:.82rem}
+.sb code.call{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.78rem;padding:6px 8px}
+.ret{font-family:var(--mono);font-size:.76rem;color:var(--t-str);overflow-wrap:anywhere}
+.ret.bad{color:#b42318}
+
+.pipe{position:relative;display:flex;align-items:center;justify-content:center}
+.pipe .line{position:absolute;left:4px;right:4px;top:50%;height:4px;transform:translateY(-50%);border-radius:2px;background:var(--line)}
+.pipe.fwd .line,.pipe.back .line{background:repeating-linear-gradient(90deg,var(--amber) 0 8px,transparent 8px 16px);background-size:16px 4px}
+.pipe.fwd .line{animation:flowR .6s linear infinite}
+.pipe.back .line{animation:flowL .6s linear infinite}
+.pipe .line::after{content:"";position:absolute;top:50%;width:0;height:0;border:6px solid transparent;transform:translateY(-50%);opacity:0}
+.pipe.fwd .line::after{right:-6px;border-left-color:var(--amber);opacity:1}
+.pipe.back .line::after{left:-6px;border-right-color:var(--amber);opacity:1}
+.pipe .pkt{position:relative;top:-18px;font-family:var(--mono);font-size:.66rem;background:var(--amber);color:var(--amber-ink);border-radius:999px;padding:1px 7px;white-space:nowrap;opacity:0;transition:opacity .2s}
+.pipe.fwd .pkt,.pipe.back .pkt{opacity:1}
+@keyframes flowR{to{background-position:16px 0}}
+@keyframes flowL{to{background-position:-16px 0}}
+
+.arrlabel{font-family:var(--mono);font-size:.76rem;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px;max-height:210px;overflow:auto}
+.tile{border:1px solid var(--line);border-radius:6px;padding:5px 7px;background:var(--sunk);display:flex;flex-direction:column;min-width:0}
+.tile .ti{font-family:var(--mono);font-size:.62rem;color:var(--muted)}
+.tile .tt{font-size:.74rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile.new{background:var(--new);border-color:var(--t-str)}
+.tile.chg{background:var(--chg);border-color:var(--amber)}
+.tile.hit{background:var(--hit);border-color:var(--t-num)}
+.tile.del{background:var(--del);border-color:#b42318;text-decoration:line-through;opacity:.7}
+.tile.new.anim{animation:pop .5s ease-out both}
+.tile.chg.anim{animation:pulse .9s ease-out}
+.tile.del.anim{animation:fadeout .9s ease-out both}
+.tile.scan{animation:scan .45s ease-out both;animation-delay:var(--d)}
+@keyframes pop{from{transform:scale(.4);opacity:0}70%{transform:scale(1.08)}to{transform:scale(1);opacity:1}}
+@keyframes pulse{0%{box-shadow:0 0 0 0 var(--amber)}100%{box-shadow:0 0 0 8px transparent}}
+@keyframes fadeout{from{opacity:1;transform:scale(1)}to{opacity:.7;transform:scale(.94)}}
+@keyframes scan{0%{outline:2px solid var(--teal);outline-offset:0}100%{outline:2px solid transparent;outline-offset:3px}}
+
+.encmode{font-size:.78rem;font-weight:600}
+.focus{font-family:var(--mono);font-size:.74rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.strip{display:grid;height:22px;gap:2px}
+.strip .blk{border-radius:2px;min-width:2px}
+.striplabels{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:.7rem;color:var(--muted)}
+.striplabels b{color:var(--ink);font-family:var(--mono);font-weight:500}
+.stripnote{font-size:.72rem;color:var(--muted)}
+
+.folder{font-family:var(--mono);font-size:.76rem;color:var(--muted)}
+.frow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;align-items:center;border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--panel)}
+.frow .fname{font-family:var(--mono);font-size:.74rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.frow .fsz{font-family:var(--mono);font-size:.7rem;color:var(--muted)}
+.frow .fbar{grid-column:1/-1}
+.fbar{display:flex;height:10px;border-radius:3px;overflow:hidden;gap:1px;background:var(--sunk)}
+.fbar.empty{background:repeating-linear-gradient(45deg,var(--sunk) 0 6px,transparent 6px 12px)}
+.fbar.dim{opacity:.5}
+.fbar .seg.hdr{background:var(--seg-len)}
+.fbar .seg.doc{background:var(--teal-2)}
+.fbar .seg.doc.alt{background:var(--teal)}
+.frow.reading{border-color:var(--teal);animation:pulse .9s ease-out}
+.frow.tmp{border-style:dashed;opacity:.9}
+.fbar.fill .seg{transform-origin:left;animation:grow 1.1s ease-out both;background:var(--amber)}
+@keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+.frow.swap{animation:swapin .7s ease-out;border-color:var(--amber)}
+@keyframes swapin{from{transform:translateY(16px);opacity:.3}to{transform:none;opacity:1}}
+.frow.pending{border-style:dashed}
+
+.flowfoot{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 16px;align-items:center}
+.flowcap{margin:0;display:flex;flex-direction:column;gap:2px;min-height:48px}
+.flowcap b{font-size:1rem;font-weight:600}
+.flowcap span{color:var(--muted);font-size:.88rem}
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.controls .primary{background:var(--teal);border-color:var(--teal);color:#fff;min-width:80px;font-weight:600}
+.controls button:disabled{opacity:.45;cursor:default}
+.count{font-family:var(--mono);font-size:.76rem;color:var(--muted);font-variant-numeric:tabular-nums;min-width:11ch}
+.progress{grid-column:1/-1;height:4px;background:var(--sunk);border-radius:2px;overflow:hidden}
+.progress span{display:block;height:100%;width:0;background:var(--amber);transition:width .3s}
+.step[aria-current="true"]{background:var(--hit);box-shadow:inset 3px 0 0 var(--teal)}
+.step{cursor:pointer}
+
+@media (max-width:1000px){
+  .stage{grid-template-columns:minmax(0,1fr);grid-template-rows:auto}
+  .station{min-height:0}
+  .pipe{height:40px}
+  .pipe .line{left:50%;right:auto;top:4px;bottom:4px;width:4px;height:auto;transform:translateX(-50%)}
+  .pipe.fwd .line,.pipe.back .line{background:repeating-linear-gradient(180deg,var(--amber) 0 8px,transparent 8px 16px);background-size:4px 16px}
+  .pipe.fwd .line{animation:flowD .6s linear infinite}
+  .pipe.back .line{animation:flowU .6s linear infinite}
+  .pipe .line::after{display:none}
+  .pipe .pkt{top:0;left:24px}
+  .flowfoot{grid-template-columns:minmax(0,1fr)}
+}
+@keyframes flowD{to{background-position:0 16px}}
+@keyframes flowU{to{background-position:0 -16px}}
+@media (prefers-reduced-motion: reduce){
+  .pipe .line,.tile,.frow,.fbar .seg,.station{animation:none!important;transition:none!important}
+}
+@media (max-width:1000px){
+  .flowfoot{position:sticky;bottom:env(safe-area-inset-bottom,0px);background:var(--panel);padding-block:10px 6px;z-index:2;border-top:1px solid var(--line)}
+}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="mark" viewBox="0 0 64 64">
+    <rect x="22" y="6" width="32" height="40" rx="3.5" fill="#4f9ea3" opacity=".5"/>
+    <rect x="16" y="12" width="32" height="40" rx="3.5" fill="#4f9ea3"/>
+    <path d="M13.5 18H33l9 9v30.5a3.5 3.5 0 0 1-3.5 3.5h-25a3.5 3.5 0 0 1-3.5-3.5v-36A3.5 3.5 0 0 1 13.5 18z" fill="#1d5c63"/>
+    <path d="M33 18v5.5a3.5 3.5 0 0 0 3.5 3.5H42z" fill="#4f9ea3"/>
+    <rect x="15" y="32" width="5" height="5" rx="1" fill="#f0a03c"/><rect x="23" y="32" width="13" height="5" rx="2.5" fill="#e9f2f1"/>
+    <rect x="15" y="41" width="5" height="5" rx="1" fill="#e9f2f1"/><rect x="23" y="41" width="15" height="5" rx="2.5" fill="#e9f2f1"/>
+    <rect x="15" y="50" width="5" height="5" rx="1" fill="#e9f2f1"/><rect x="23" y="50" width="9" height="5" rx="2.5" fill="#e9f2f1"/>
+  </symbol></defs></svg>
+
+<div class="wrap">
+  <header>
+    <div class="brand"><svg width="36" height="36" aria-hidden="true"><use href="#mark"/></svg><b>youssef<span>db</span></b></div>
+    <p class="tagline">Watch a NoSQL database work. Run a query, then follow your data from your code into memory, into BSON bytes, and onto disk.</p>
+    <span class="pill" id="ver">real youssefdb, running in your browser</span>
+  </header>
+
+  <section class="panel flow" aria-label="How your data moves">
+    <div class="stage">
+      <div class="station" id="st-code"><h3><span class="ico">JS</span>Your code</h3><div class="sb" id="sb-code"></div></div>
+      <div class="pipe" id="p1"><span class="line"></span><span class="pkt"></span></div>
+      <div class="station" id="st-mem"><h3><span class="ico mem">RAM</span>Memory</h3><div class="sb" id="sb-mem"></div></div>
+      <div class="pipe" id="p2"><span class="line"></span><span class="pkt"></span></div>
+      <div class="station" id="st-enc"><h3><span class="ico enc">BSON</span>Encoder</h3><div class="sb" id="sb-enc"></div></div>
+      <div class="pipe" id="p3"><span class="line"></span><span class="pkt"></span></div>
+      <div class="station" id="st-disk"><h3><span class="ico disk">DISK</span>Disk</h3><div class="sb" id="sb-disk"></div></div>
+    </div>
+    <div class="flowfoot">
+      <p class="flowcap" id="flowcap" aria-live="polite"></p>
+      <div class="controls">
+        <button type="button" id="prev">Back</button>
+        <button type="button" id="play" class="primary">Play</button>
+        <button type="button" id="next">Next</button>
+        <span class="count" id="flowcount"></span>
+      </div>
+      <div class="progress"><span id="flowbar"></span></div>
+    </div>
+  </section>
+
+  <div class="top">
+    <aside class="panel lessons">
+      <h2>Lessons</h2>
+      <ol id="lessons"></ol>
+    </aside>
+
+    <main class="panel">
+      <h2 id="ltitle">Lesson</h2>
+      <div class="explain" id="explain"></div>
+      <label for="code" class="hint">Your code · <code>users</code> = <code>db.collection('users')</code></label>
+      <textarea id="code" spellcheck="false" autocomplete="off"></textarea>
+      <div class="bar">
+        <button type="button" class="run" id="run">Run</button>
+        <button type="button" id="reset">Reset data</button>
+        <span class="hint">Ctrl + Enter</span>
+      </div>
+      <pre class="result" id="result" aria-live="polite"></pre>
+    </main>
+
+    <section class="panel">
+      <h2>What just happened</h2>
+      <p class="sub">Every step youssefdb took, in order. Click a disk step to see those exact bytes.</p>
+      <ol class="steps" id="steps"></ol>
+    </section>
+  </div>
+
+  <div class="bottom">
+    <section class="panel disk">
+      <h2>1 · Disk</h2>
+      <p class="sub">A database is a folder. Each collection is one file.</p>
+      <div class="tree" id="tree"></div>
+      <p class="diskinfo" id="diskinfo"></p>
+    </section>
+
+    <section class="panel">
+      <h2>2 · Memory <span class="where" id="memwhere"></span></h2>
+      <p class="sub" id="memsub">When youssefdb opens a file, it turns the bytes back into a JavaScript array. Click a document.</p>
+      <div id="oid"></div>
+      <div class="docs" id="docs"></div>
+    </section>
+
+    <section class="panel">
+      <h2>3 · Bytes <span class="where" id="byteswhere"></span></h2>
+      <div class="caption" id="caption">Point at any byte to see what it means.</div>
+      <div class="keys">
+        <span style="--sw:var(--seg-len)">length</span><span style="--sw:var(--seg-type)">type</span><span style="--sw:var(--seg-key)">field name</span><span style="--sw:var(--seg-val)">value</span><span style="--sw:var(--seg-oid)">ObjectId</span><span style="--sw:var(--seg-end)">end marker</span>
+      </div>
+      <div class="hexwrap" id="hexwrap"><div class="hex" id="hex"></div></div>
+      <button type="button" class="more" id="more" hidden>Show all bytes</button>
+    </section>
+  </div>
+</div>
+<script>
+var process=globalThis.process||{pid:1,cwd:function(){return '/'},env:{}};
+var YDB=(()=>{var Ht=Object.defineProperty;var Ns=Object.getOwnPropertyDescriptor;var Os=Object.getOwnPropertyNames;var Es=Object.prototype.hasOwnProperty;var c=(e,t)=>Ht(e,"name",{value:t,configurable:!0});var Is=(e,t)=>()=>(e&&(t=e(e=0)),t);var x=(e,t)=>()=>(t||e((t={exports:{}}).exports,t),t.exports),Ts=(e,t)=>{for(var n in t)Ht(e,n,{get:t[n],enumerable:!0})},$s=(e,t,n,r)=>{if(t&&typeof t=="object"||typeof t=="function")for(let s of Os(t))!Es.call(e,s)&&s!==n&&Ht(e,s,{get:()=>t[s],enumerable:!(r=Ns(t,s))||r.enumerable});return e};var Jt=e=>$s(Ht({},"__esModule",{value:!0}),e);var Ft={};Ts(Ft,{BSON:()=>di,BSONError:()=>h,BSONOffsetError:()=>H,BSONRegExp:()=>rt,BSONRuntimeError:()=>Tt,BSONSymbol:()=>dt,BSONType:()=>jn,BSONValue:()=>F,BSONVersionError:()=>tt,Binary:()=>_,Code:()=>et,DBRef:()=>K,Decimal128:()=>gt,Double:()=>ft,EJSON:()=>wt,Int32:()=>ct,Long:()=>p,MaxKey:()=>yt,MinKey:()=>mt,ObjectId:()=>nt,Timestamp:()=>lt,UUID:()=>ot,calculateObjectSize:()=>Gn,deserialize:()=>Kn,deserializeStream:()=>Xn,onDemand:()=>$t,serialize:()=>Wn,serializeWithBufferAndIndex:()=>Zn,setInternalBufferSize:()=>Yn});function St(e){return As(e)==="Uint8Array"}function Re(e){return typeof e=="object"&&e!=null&&Symbol.toStringTag in e&&(e[Symbol.toStringTag]==="ArrayBuffer"||e[Symbol.toStringTag]==="SharedArrayBuffer")}function Bt(e){return e instanceof RegExp||Object.prototype.toString.call(e)==="[object RegExp]"}function je(e){return typeof e=="object"&&e!=null&&Symbol.toStringTag in e&&e[Symbol.toStringTag]==="Map"}function Nt(e){return e instanceof Date||Object.prototype.toString.call(e)==="[object Date]"}function M(e,t){return JSON.stringify(e,(n,r)=>typeof r=="bigint"?{$numberLong:`${r}`}:je(r)?Object.fromEntries(r):r)}function _s(e){if(e!=null&&typeof e=="object"&&"stylize"in e&&typeof e.stylize=="function")return e.stylize}function Cn(e,t,n,r){if(r){sn??=new TextDecoder("utf8",{fatal:!0});try{return sn.decode(e.subarray(t,n))}catch(s){throw new h("Invalid UTF-8 string in BSON document",{cause:s})}}return on??=new TextDecoder("utf8",{fatal:!1}),on.decode(e.subarray(t,n))}function zn(e,t,n){if(e.length===0)return"";let r=n-t;if(r===0)return"";if(r>20)return null;if(r===1&&e[t]<128)return String.fromCharCode(e[t]);if(r===2&&e[t]<128&&e[t+1]<128)return String.fromCharCode(e[t])+String.fromCharCode(e[t+1]);if(r===3&&e[t]<128&&e[t+1]<128&&e[t+2]<128)return String.fromCharCode(e[t])+String.fromCharCode(e[t+1])+String.fromCharCode(e[t+2]);let s=[];for(let i=t;i<n;i++){let f=e[i];if(f>127)return null;s.push(f)}return String.fromCharCode(...s)}function Ds(e,t,n){if(t.length===0)return 0;if(t.length>25||e.length-n<t.length)return null;for(let r=0,s=n;r<t.length;r++,s++){let i=t.charCodeAt(r);if(i>127)return null;e[s]=i}return t.length}function Rs(e){return Q.fromNumberArray(Array.from({length:e},()=>Math.floor(Math.random()*256)))}function Cs(){let{navigator:e}=globalThis;return typeof e=="object"&&e.product==="ReactNative"}function zs(e){if(e<0)throw new RangeError(`The argument 'byteLength' is invalid. Received ${e}`);return jt.fromNumberArray(Array.from({length:e},()=>Math.floor(Math.random()*256)))}function X(e){if(e.sub_type!==_.SUBTYPE_VECTOR)return;let t=e.position,n=e.buffer[0],r=e.buffer[1];if((n===_.VECTOR_TYPE.Float32||n===_.VECTOR_TYPE.Int8)&&r!==0)throw new h("Invalid Vector: padding must be zero for int8 and float32 vectors");if(n===_.VECTOR_TYPE.Float32&&t!==0&&t-2!==0&&(t-2)%4!==0)throw new h("Invalid Vector: Float32 vector must contain a multiple of 4 bytes");if(n===_.VECTOR_TYPE.PackedBit&&r!==0&&t===2)throw new h("Invalid Vector: padding must be zero for packed bit vectors that are empty");if(n===_.VECTOR_TYPE.PackedBit&&r>7)throw new h(`Invalid Vector: padding must be a value between 0 and 7. found: ${r}`)}function Pn(e){return e!=null&&typeof e=="object"&&"$id"in e&&e.$id!=null&&"$ref"in e&&typeof e.$ref=="string"&&(!("$db"in e)||"$db"in e&&typeof e.$db=="string")}function Fn(e){if(e==="")return e;let t=0,n=e[t]==="-",r=e[t]==="+";(r||n)&&(t+=1);let s=!1;for(;t<e.length&&e[t]==="0";++t)s=!0;return s?`${n?"-":""}${e.length===t?"0":e.slice(t)}`:r?e.slice(1):e}function ks(e,t){t=t??10;let n="0123456789abcdefghijklmnopqrstuvwxyz".slice(0,t);return new RegExp(`[^-+${n}]`,"i").test(e)?!1:e}function dn(e){return!isNaN(parseInt(e,10))}function ti(e){let t=p.fromNumber(1e9),n=p.fromNumber(0);if(!e.parts[0]&&!e.parts[1]&&!e.parts[2]&&!e.parts[3])return{quotient:e,rem:n};for(let r=0;r<=3;r++)n=n.shiftLeft(32),n=n.add(new p(e.parts[r],0)),e.parts[r]=n.div(t).low,n=n.modulo(t);return{quotient:e,rem:n}}function ei(e,t){if(!e&&!t)return{high:p.fromNumber(0),low:p.fromNumber(0)};let n=e.shiftRightUnsigned(32),r=new p(e.getLowBits(),0),s=t.shiftRightUnsigned(32),i=new p(t.getLowBits(),0),f=n.multiply(s),l=n.multiply(i),o=r.multiply(s),d=r.multiply(i);return f=f.add(l.shiftRightUnsigned(32)),l=new p(l.getLowBits(),0).add(o).add(d.shiftRightUnsigned(32)),f=f.add(l.shiftRightUnsigned(32)),d=l.shiftLeft(32).add(new p(d.getLowBits(),0)),{high:f,low:d}}function ni(e,t){let n=e.high>>>0,r=t.high>>>0;if(n<r)return!0;if(n===r){let s=e.low>>>0,i=t.low>>>0;if(s<i)return!0}return!1}function W(e,t){throw new h(`"${e}" is not a valid Decimal128 string - ${t}`)}function Yt(e,t,n){let r=5;if(Array.isArray(e))for(let s=0;s<e.length;s++)r+=wn(s.toString(),e[s],t,!0,n);else{typeof e?.toBSON=="function"&&(e=e.toBSON());for(let s of Object.keys(e))r+=wn(s,e[s],t,!1,n)}return r}function wn(e,t,n=!1,r=!1,s=!1){switch(typeof t?.toBSON=="function"&&(t=t.toBSON()),typeof t){case"string":return 1+u.utf8ByteLength(e)+1+4+u.utf8ByteLength(t)+1;case"number":return Math.floor(t)===t&&t>=On&&t<=Nn&&t>=zt&&t<=Ct?(e!=null?u.utf8ByteLength(e)+1:0)+5:(e!=null?u.utf8ByteLength(e)+1:0)+9;case"undefined":return r||!s?(e!=null?u.utf8ByteLength(e)+1:0)+1:0;case"boolean":return(e!=null?u.utf8ByteLength(e)+1:0)+2;case"object":if(t!=null&&typeof t._bsontype=="string"&&t[It]!==ht)throw new tt;if(t==null||t._bsontype==="MinKey"||t._bsontype==="MaxKey")return(e!=null?u.utf8ByteLength(e)+1:0)+1;if(t._bsontype==="ObjectId")return(e!=null?u.utf8ByteLength(e)+1:0)+13;if(t instanceof Date||Nt(t))return(e!=null?u.utf8ByteLength(e)+1:0)+9;if(ArrayBuffer.isView(t)||t instanceof ArrayBuffer||Re(t))return(e!=null?u.utf8ByteLength(e)+1:0)+6+t.byteLength;if(t._bsontype==="Long"||t._bsontype==="Double"||t._bsontype==="Timestamp")return(e!=null?u.utf8ByteLength(e)+1:0)+9;if(t._bsontype==="Decimal128")return(e!=null?u.utf8ByteLength(e)+1:0)+17;if(t._bsontype==="Code")return t.scope!=null&&Object.keys(t.scope).length>0?(e!=null?u.utf8ByteLength(e)+1:0)+1+4+4+u.utf8ByteLength(t.code.toString())+1+Yt(t.scope,n,s):(e!=null?u.utf8ByteLength(e)+1:0)+1+4+u.utf8ByteLength(t.code.toString())+1;if(t._bsontype==="Binary"){let i=t;return i.sub_type===_.SUBTYPE_BYTE_ARRAY?(e!=null?u.utf8ByteLength(e)+1:0)+(i.position+1+4+1+4):(e!=null?u.utf8ByteLength(e)+1:0)+(i.position+1+4+1)}else{if(t._bsontype==="Symbol")return(e!=null?u.utf8ByteLength(e)+1:0)+u.utf8ByteLength(t.value)+4+1+1;if(t._bsontype==="DBRef"){let i=Object.assign({$ref:t.collection,$id:t.oid},t.fields);return t.db!=null&&(i.$db=t.db),(e!=null?u.utf8ByteLength(e)+1:0)+1+Yt(i,n,s)}else return t instanceof RegExp||Bt(t)?(e!=null?u.utf8ByteLength(e)+1:0)+1+u.utf8ByteLength(t.source)+1+(t.global?1:0)+(t.ignoreCase?1:0)+(t.multiline?1:0)+1:t._bsontype==="BSONRegExp"?(e!=null?u.utf8ByteLength(e)+1:0)+1+u.utf8ByteLength(t.pattern)+1+u.utf8ByteLength(t.options)+1:(e!=null?u.utf8ByteLength(e)+1:0)+Yt(t,n,s)+1}case"function":return n?(e!=null?u.utf8ByteLength(e)+1:0)+1+4+u.utf8ByteLength(t.toString())+1:0;case"bigint":return(e!=null?u.utf8ByteLength(e)+1:0)+9;case"symbol":return 0;default:throw new h(`Unrecognized JS type: ${typeof t}`)}}function ri(e){return e.split("").sort().join("")}function qn(e,t,n){t=t??{};let r=t&&t.index?t.index:0,s=T.getInt32LE(e,r);if(s<5)throw new h(`bson size must be >= 5, is ${s}`);if(t.allowObjectSmallerThanBufferSize&&e.length<s)throw new h(`buffer length ${e.length} must be >= bson size ${s}`);if(!t.allowObjectSmallerThanBufferSize&&e.length!==s)throw new h(`buffer length ${e.length} must === bson size ${s}`);if(s+r>e.byteLength)throw new h(`(bson size ${s} + options.index ${r} must be <= buffer length ${e.byteLength})`);if(e[r+s-1]!==0)throw new h("One object, sized correctly, with a spot for an EOO, but the EOO isn't 0x00");return Wt(e,r,t,n)}function Wt(e,t,n,r=!1){let s=n.fieldsAsRaw==null?null:n.fieldsAsRaw,i=n.raw==null?!1:n.raw,f=typeof n.bsonRegExp=="boolean"?n.bsonRegExp:!1,l=n.promoteBuffers??!1,o=n.promoteLongs??!0,d=n.promoteValues??!0,g=n.useBigInt64??!1;if(g&&!d)throw new h("Must either request bigint or Long for int64 deserialization");if(g&&!o)throw new h("Must either request bigint or Long for int64 deserialization");let a=n.validation==null?{utf8:!0}:n.validation,y=!0,w,m,I=a.utf8;if(typeof I=="boolean")w=I;else{y=!1;let E=Object.keys(I).map(function($){return I[$]});if(E.length===0)throw new h("UTF-8 validation setting cannot be empty");if(typeof E[0]!="boolean")throw new h("Invalid UTF-8 validation option, must specify boolean values");if(w=E[0],!E.every($=>$===w))throw new h("Invalid UTF-8 validation option - keys must be all true or all false")}if(!y){m=new Set;for(let E of Object.keys(I))m.add(E)}let A=t;if(e.length<5)throw new h("corrupt bson message < 5 bytes long");let j=T.getInt32LE(e,t);if(t+=4,j<5||j>e.length)throw new h("corrupt bson message");let O=r?[]:{},P=0,B=r?!1:null;for(;;){let E=e[t++];if(E===0)break;let $=t;for(;e[$]!==0&&$<e.length;)$++;if($>=e.byteLength)throw new h("Bad BSON Document: illegal CString");let Z=r?P++:u.toUTF8(e,t,$,!1),C=!0;y||m?.has(Z)?C=w:C=!w,B!==!1&&Z[0]==="$"&&(B=fi.test(Z));let N;if(t=$+1,E===En){let b=T.getInt32LE(e,t);if(t+=4,b<=0||b>e.length-t||e[t+b-1]!==0)throw new h("bad string length in bson");N=u.toUTF8(e,t,t+b-1,C),t=t+b}else if(E===Tn){let b=u.allocateUnsafe(12);for(let S=0;S<12;S++)b[S]=e[t+S];N=new nt(b),t=t+12}else if(E===Rt&&d===!1)N=new ct(T.getInt32LE(e,t)),t+=4;else if(E===Rt)N=T.getInt32LE(e,t),t+=4;else if(E===Ce)N=T.getFloat64LE(e,t),t+=8,d===!1&&(N=new ft(N));else if(E===An){let b=T.getInt32LE(e,t),S=T.getInt32LE(e,t+4);t+=8,N=new Date(new p(b,S).toNumber())}else if(E===$n){if(e[t]!==0&&e[t]!==1)throw new h("illegal boolean type value");N=e[t++]===1}else if(E===ze){let b=t,S=T.getInt32LE(e,t);if(S<=0||S>e.length-t)throw new h("bad embedded document length in bson");if(i)N=e.subarray(t,t+S);else{let L=n;y||(L={...n,validation:{utf8:C}}),N=Wt(e,b,L,!1)}t=t+S}else if(E===In){let b=t,S=T.getInt32LE(e,t),L=n,k=t+S;if(s&&s[Z]&&(L={...n,raw:!0}),y||(L={...L,validation:{utf8:C}}),N=Wt(e,b,L,!0),t=t+S,e[t-1]!==0)throw new h("invalid array terminator byte");if(t!==k)throw new h("corrupted array bson")}else if(E===Ls)N=void 0;else if(E===Fe)N=null;else if(E===qe)if(g)N=T.getBigInt64LE(e,t),t+=8;else{let b=T.getInt32LE(e,t),S=T.getInt32LE(e,t+4);t+=8;let L=new p(b,S);o&&d===!0?N=L.lessThanOrEqual(ii)&&L.greaterThanOrEqual(oi)?L.toNumber():L:N=L}else if(E===xn){let b=u.allocateUnsafe(16);for(let S=0;S<16;S++)b[S]=e[t+S];t=t+16,N=new gt(b)}else if(E===Pe){let b=T.getInt32LE(e,t);t+=4;let S=b,L=e[t++];if(b<0)throw new h("Negative binary type element size found");if(b>e.byteLength)throw new h("Binary type size larger than document size");if(L===_.SUBTYPE_BYTE_ARRAY){if(b=T.getInt32LE(e,t),t+=4,b<0)throw new h("Negative binary type element size found for subtype 0x02");if(b>S-4)throw new h("Binary type with subtype 0x02 contains too long binary size");if(b<S-4)throw new h("Binary type with subtype 0x02 contains too short binary size")}l&&d?N=u.toLocalBufferType(e.subarray(t,t+b)):(N=new _(e.subarray(t,t+b),L),L===ke&&ot.isValid(N)&&(N=N.toUUID())),t=t+b}else if(E===Zt&&f===!1){for($=t;e[$]!==0&&$<e.length;)$++;if($>=e.length)throw new h("Bad BSON Document: illegal CString");let b=u.toUTF8(e,t,$,!1);for(t=$+1,$=t;e[$]!==0&&$<e.length;)$++;if($>=e.length)throw new h("Bad BSON Document: illegal CString");let S=u.toUTF8(e,t,$,!1);t=$+1;let L=new Array(S.length);for($=0;$<S.length;$++)switch(S[$]){case"m":L[$]="m";break;case"s":L[$]="g";break;case"i":L[$]="i";break}N=new RegExp(b,L.join(""))}else if(E===Zt&&f===!0){for($=t;e[$]!==0&&$<e.length;)$++;if($>=e.length)throw new h("Bad BSON Document: illegal CString");let b=u.toUTF8(e,t,$,!1);for(t=$+1,$=t;e[$]!==0&&$<e.length;)$++;if($>=e.length)throw new h("Bad BSON Document: illegal CString");let S=u.toUTF8(e,t,$,!1);t=$+1,N=new rt(b,S)}else if(E===_n){let b=T.getInt32LE(e,t);if(t+=4,b<=0||b>e.length-t||e[t+b-1]!==0)throw new h("bad string length in bson");let S=u.toUTF8(e,t,t+b-1,C);N=d?S:new dt(S),t=t+b}else if(E===Un)N=new lt({i:T.getUint32LE(e,t),t:T.getUint32LE(e,t+4)}),t+=8;else if(E===Dn)N=new mt;else if(E===Rn)N=new yt;else if(E===Me){let b=T.getInt32LE(e,t);if(t+=4,b<=0||b>e.length-t||e[t+b-1]!==0)throw new h("bad string length in bson");let S=u.toUTF8(e,t,t+b-1,C);N=new et(S),t=t+b}else if(E===Ln){let b=T.getInt32LE(e,t);if(t+=4,b<13)throw new h("code_w_scope total size shorter minimum expected length");let S=T.getInt32LE(e,t);if(t+=4,S<=0||S>e.length-t||e[t+S-1]!==0)throw new h("bad string length in bson");let L=u.toUTF8(e,t,t+S-1,C);t=t+S;let k=t,R=T.getInt32LE(e,t),Bs=Wt(e,k,n,!1);if(t=t+R,b<8+R+S)throw new h("code_w_scope total size is too short, truncating scope");if(b>8+R+S)throw new h("code_w_scope total size is too long, clips outer document");N=new et(L,Bs)}else if(E===Us){let b=T.getInt32LE(e,t);if(t+=4,b<=0||b>e.length-t||e[t+b-1]!==0)throw new h("bad string length in bson");let S=u.toUTF8(e,t,t+b-1,C);t=t+b;let L=u.allocateUnsafe(12);for(let R=0;R<12;R++)L[R]=e[t+R];let k=new nt(L);t=t+12,N=new K(S,k)}else throw new h(`Detected unknown BSON type ${E.toString(16)} for fieldname "${Z}"`);Z==="__proto__"?Object.defineProperty(O,Z,{value:N,writable:!0,enumerable:!0,configurable:!0}):O[Z]=N}if(j!==t-A)throw r?new h("corrupt array bson"):new h("corrupt object bson");if(!B)return O;if(Pn(O)){let E=Object.assign({},O);return delete E.$ref,delete E.$id,delete E.$db,new K(O.$ref,O.$id,O.$db,E)}return O}function he(e,t,n,r){e[r++]=En;let s=u.encodeUTF8Into(e,t,r);r=r+s+1,e[r-1]=0;let i=u.encodeUTF8Into(e,n,r+4);return T.setInt32LE(e,r,i+1),r=r+4+i,e[r++]=0,r}function ge(e,t,n,r){let i=!Object.is(n,-0)&&Number.isSafeInteger(n)&&n<=Ct&&n>=zt?Rt:Ce;e[r++]=i;let f=u.encodeUTF8Into(e,t,r);return r=r+f,e[r++]=0,i===Rt?r+=T.setInt32LE(e,r,n):r+=T.setFloat64LE(e,r,n),r}function ye(e,t,n,r){e[r++]=qe;let s=u.encodeUTF8Into(e,t,r);return r+=s,e[r++]=0,r+=T.setBigInt64LE(e,r,n),r}function bt(e,t,n,r){e[r++]=Fe;let s=u.encodeUTF8Into(e,t,r);return r=r+s,e[r++]=0,r}function me(e,t,n,r){e[r++]=$n;let s=u.encodeUTF8Into(e,t,r);return r=r+s,e[r++]=0,e[r++]=n?1:0,r}function de(e,t,n,r){e[r++]=An;let s=u.encodeUTF8Into(e,t,r);r=r+s,e[r++]=0;let i=p.fromNumber(n.getTime()),f=i.getLowBits(),l=i.getHighBits();return r+=T.setInt32LE(e,r,f),r+=T.setInt32LE(e,r,l),r}function we(e,t,n,r){e[r++]=Zt;let s=u.encodeUTF8Into(e,t,r);if(r=r+s,e[r++]=0,n.source&&n.source.match(Kt)!=null)throw new h("value "+n.source+" must not contain null bytes");return r=r+u.encodeUTF8Into(e,n.source,r),e[r++]=0,n.ignoreCase&&(e[r++]=105),n.global&&(e[r++]=115),n.multiline&&(e[r++]=109),e[r++]=0,r}function pe(e,t,n,r){e[r++]=Zt;let s=u.encodeUTF8Into(e,t,r);if(r=r+s,e[r++]=0,n.pattern.match(Kt)!=null)throw new h("pattern "+n.pattern+" must not contain null bytes");r=r+u.encodeUTF8Into(e,n.pattern,r),e[r++]=0;let i=n.options.split("").sort().join("");return r=r+u.encodeUTF8Into(e,i,r),e[r++]=0,r}function be(e,t,n,r){n===null?e[r++]=Fe:n._bsontype==="MinKey"?e[r++]=Dn:e[r++]=Rn;let s=u.encodeUTF8Into(e,t,r);return r=r+s,e[r++]=0,r}function Se(e,t,n,r){e[r++]=Tn;let s=u.encodeUTF8Into(e,t,r);return r=r+s,e[r++]=0,r+=n.serializeInto(e,r),r}function Be(e,t,n,r){e[r++]=Pe;let s=u.encodeUTF8Into(e,t,r);r=r+s,e[r++]=0;let i=n.length;if(r+=T.setInt32LE(e,r,i),e[r++]=xs,i<=16)for(let f=0;f<i;f++)e[r+f]=n[f];else e.set(n,r);return r=r+i,r}function Ne(e,t,n,r,s,i,f,l,o){if(o.has(n))throw new h("Cannot convert circular structure to BSON");o.add(n),e[r++]=Array.isArray(n)?In:ze;let d=u.encodeUTF8Into(e,t,r);r=r+d,e[r++]=0;let g=Pt(e,n,s,r,i+1,f,l,o);return o.delete(n),g}function Oe(e,t,n,r){e[r++]=xn;let s=u.encodeUTF8Into(e,t,r);r=r+s,e[r++]=0;for(let i=0;i<16;i++)e[r+i]=n.bytes[i];return r+16}function Ee(e,t,n,r){e[r++]=n._bsontype==="Long"?qe:Un;let s=u.encodeUTF8Into(e,t,r);r=r+s,e[r++]=0;let i=n.getLowBits(),f=n.getHighBits();return r+=T.setInt32LE(e,r,i),r+=T.setInt32LE(e,r,f),r}function Ie(e,t,n,r){n=n.valueOf(),e[r++]=Rt;let s=u.encodeUTF8Into(e,t,r);return r=r+s,e[r++]=0,r+=T.setInt32LE(e,r,n),r}function Te(e,t,n,r){e[r++]=Ce;let s=u.encodeUTF8Into(e,t,r);return r=r+s,e[r++]=0,r+=T.setFloat64LE(e,r,n.value),r}function $e(e,t,n,r){e[r++]=Me;let s=u.encodeUTF8Into(e,t,r);r=r+s,e[r++]=0;let i=n.toString(),f=u.encodeUTF8Into(e,i,r+4)+1;return T.setInt32LE(e,r,f),r=r+4+f-1,e[r++]=0,r}function Ae(e,t,n,r,s=!1,i=0,f=!1,l=!0,o){if(n.scope&&typeof n.scope=="object"){e[r++]=Ln;let d=u.encodeUTF8Into(e,t,r);r=r+d,e[r++]=0;let g=r,a=n.code;r=r+4;let y=u.encodeUTF8Into(e,a,r+4)+1;T.setInt32LE(e,r,y),e[r+4+y-1]=0,r=r+y+4;let w=Pt(e,n.scope,s,r,i+1,f,l,o);r=w-1;let m=w-g;g+=T.setInt32LE(e,g,m),e[r++]=0}else{e[r++]=Me;let d=u.encodeUTF8Into(e,t,r);r=r+d,e[r++]=0;let g=n.code.toString(),a=u.encodeUTF8Into(e,g,r+4)+1;T.setInt32LE(e,r,a),r=r+4+a-1,e[r++]=0}return r}function _e(e,t,n,r){e[r++]=Pe;let s=u.encodeUTF8Into(e,t,r);r=r+s,e[r++]=0;let i=n.buffer,f=n.position;if(n.sub_type===_.SUBTYPE_BYTE_ARRAY&&(f=f+4),r+=T.setInt32LE(e,r,f),e[r++]=n.sub_type,n.sub_type===_.SUBTYPE_BYTE_ARRAY&&(f=f-4,r+=T.setInt32LE(e,r,f)),n.sub_type===_.SUBTYPE_VECTOR&&X(n),f<=16)for(let l=0;l<f;l++)e[r+l]=i[l];else e.set(i,r);return r=r+n.position,r}function Le(e,t,n,r){e[r++]=_n;let s=u.encodeUTF8Into(e,t,r);r=r+s,e[r++]=0;let i=u.encodeUTF8Into(e,n.value,r+4)+1;return T.setInt32LE(e,r,i),r=r+4+i-1,e[r++]=0,r}function Ue(e,t,n,r,s,i,f){e[r++]=ze;let l=u.encodeUTF8Into(e,t,r);r=r+l,e[r++]=0;let o=r,d={$ref:n.collection||n.namespace,$id:n.oid};n.db!=null&&(d.$db=n.db),d=Object.assign(d,n.fields);let g=Pt(e,d,!1,r,s+1,i,!0,f),a=g-o;return o+=T.setInt32LE(e,r,a),g}function Pt(e,t,n,r,s,i,f,l){if(l==null){if(t==null)return e[0]=5,e[1]=0,e[2]=0,e[3]=0,e[4]=0,5;if(Array.isArray(t))throw new h("serialize does not support an array as the root input");if(typeof t!="object")throw new h("serialize does not support non-object as the root input");if("_bsontype"in t&&typeof t._bsontype=="string")throw new h("BSON types cannot be serialized as a document");if(Nt(t)||Bt(t)||St(t)||Re(t))throw new h("date, regexp, typedarray, and arraybuffer cannot be BSON documents");l=new Set}l.add(t);let o=r+4;if(Array.isArray(t))for(let g=0;g<t.length;g++){let a=`${g}`,y=t[g];typeof y?.toBSON=="function"&&(y=y.toBSON());let w=typeof y;if(y===void 0)o=bt(e,a,y,o);else if(y===null)o=bt(e,a,y,o);else if(w==="string")o=he(e,a,y,o);else if(w==="number")o=ge(e,a,y,o);else if(w==="bigint")o=ye(e,a,y,o);else if(w==="boolean")o=me(e,a,y,o);else if(w==="object"&&y._bsontype==null)y instanceof Date||Nt(y)?o=de(e,a,y,o):y instanceof Uint8Array||St(y)?o=Be(e,a,y,o):y instanceof RegExp||Bt(y)?o=we(e,a,y,o):o=Ne(e,a,y,o,n,s,i,f,l);else if(w==="object"){if(y[It]!==ht)throw new tt;if(y._bsontype==="ObjectId")o=Se(e,a,y,o);else if(y._bsontype==="Decimal128")o=Oe(e,a,y,o);else if(y._bsontype==="Long"||y._bsontype==="Timestamp")o=Ee(e,a,y,o);else if(y._bsontype==="Double")o=Te(e,a,y,o);else if(y._bsontype==="Code")o=Ae(e,a,y,o,n,s,i,f,l);else if(y._bsontype==="Binary")o=_e(e,a,y,o);else if(y._bsontype==="BSONSymbol")o=Le(e,a,y,o);else if(y._bsontype==="DBRef")o=Ue(e,a,y,o,s,i,l);else if(y._bsontype==="BSONRegExp")o=pe(e,a,y,o);else if(y._bsontype==="Int32")o=Ie(e,a,y,o);else if(y._bsontype==="MinKey"||y._bsontype==="MaxKey")o=be(e,a,y,o);else if(typeof y._bsontype<"u")throw new h(`Unrecognized or invalid _bsontype: ${String(y._bsontype)}`)}else w==="function"&&i&&(o=$e(e,a,y,o))}else if(t instanceof Map||je(t)){let g=t.entries(),a=!1;for(;!a;){let y=g.next();if(a=!!y.done,a)continue;let w=y.value?y.value[0]:void 0,m=y.value?y.value[1]:void 0;typeof m?.toBSON=="function"&&(m=m.toBSON());let I=typeof m;if(typeof w=="string"&&!pn.has(w)){if(w.match(Kt)!=null)throw new h("key "+w+" must not contain null bytes");if(n){if(w[0]==="$")throw new h("key "+w+" must not start with '$'");if(w.includes("."))throw new h("key "+w+" must not contain '.'")}}if(m===void 0)f===!1&&(o=bt(e,w,m,o));else if(m===null)o=bt(e,w,m,o);else if(I==="string")o=he(e,w,m,o);else if(I==="number")o=ge(e,w,m,o);else if(I==="bigint")o=ye(e,w,m,o);else if(I==="boolean")o=me(e,w,m,o);else if(I==="object"&&m._bsontype==null)m instanceof Date||Nt(m)?o=de(e,w,m,o):m instanceof Uint8Array||St(m)?o=Be(e,w,m,o):m instanceof RegExp||Bt(m)?o=we(e,w,m,o):o=Ne(e,w,m,o,n,s,i,f,l);else if(I==="object"){if(m[It]!==ht)throw new tt;if(m._bsontype==="ObjectId")o=Se(e,w,m,o);else if(m._bsontype==="Decimal128")o=Oe(e,w,m,o);else if(m._bsontype==="Long"||m._bsontype==="Timestamp")o=Ee(e,w,m,o);else if(m._bsontype==="Double")o=Te(e,w,m,o);else if(m._bsontype==="Code")o=Ae(e,w,m,o,n,s,i,f,l);else if(m._bsontype==="Binary")o=_e(e,w,m,o);else if(m._bsontype==="BSONSymbol")o=Le(e,w,m,o);else if(m._bsontype==="DBRef")o=Ue(e,w,m,o,s,i,l);else if(m._bsontype==="BSONRegExp")o=pe(e,w,m,o);else if(m._bsontype==="Int32")o=Ie(e,w,m,o);else if(m._bsontype==="MinKey"||m._bsontype==="MaxKey")o=be(e,w,m,o);else if(typeof m._bsontype<"u")throw new h(`Unrecognized or invalid _bsontype: ${String(m._bsontype)}`)}else I==="function"&&i&&(o=$e(e,w,m,o))}}else{if(typeof t?.toBSON=="function"&&(t=t.toBSON(),t!=null&&typeof t!="object"))throw new h("toBSON function did not return an object");for(let g of Object.keys(t)){let a=t[g];typeof a?.toBSON=="function"&&(a=a.toBSON());let y=typeof a;if(typeof g=="string"&&!pn.has(g)){if(g.match(Kt)!=null)throw new h("key "+g+" must not contain null bytes");if(n){if(g[0]==="$")throw new h("key "+g+" must not start with '$'");if(g.includes("."))throw new h("key "+g+" must not contain '.'")}}if(a===void 0)f===!1&&(o=bt(e,g,a,o));else if(a===null)o=bt(e,g,a,o);else if(y==="string")o=he(e,g,a,o);else if(y==="number")o=ge(e,g,a,o);else if(y==="bigint")o=ye(e,g,a,o);else if(y==="boolean")o=me(e,g,a,o);else if(y==="object"&&a._bsontype==null)a instanceof Date||Nt(a)?o=de(e,g,a,o):a instanceof Uint8Array||St(a)?o=Be(e,g,a,o):a instanceof RegExp||Bt(a)?o=we(e,g,a,o):o=Ne(e,g,a,o,n,s,i,f,l);else if(y==="object"){if(a[It]!==ht)throw new tt;if(a._bsontype==="ObjectId")o=Se(e,g,a,o);else if(a._bsontype==="Decimal128")o=Oe(e,g,a,o);else if(a._bsontype==="Long"||a._bsontype==="Timestamp")o=Ee(e,g,a,o);else if(a._bsontype==="Double")o=Te(e,g,a,o);else if(a._bsontype==="Code")o=Ae(e,g,a,o,n,s,i,f,l);else if(a._bsontype==="Binary")o=_e(e,g,a,o);else if(a._bsontype==="BSONSymbol")o=Le(e,g,a,o);else if(a._bsontype==="DBRef")o=Ue(e,g,a,o,s,i,l);else if(a._bsontype==="BSONRegExp")o=pe(e,g,a,o);else if(a._bsontype==="Int32")o=Ie(e,g,a,o);else if(a._bsontype==="MinKey"||a._bsontype==="MaxKey")o=be(e,g,a,o);else if(typeof a._bsontype<"u")throw new h(`Unrecognized or invalid _bsontype: ${String(a._bsontype)}`)}else y==="function"&&i&&(o=$e(e,g,a,o))}}l.delete(t),e[o++]=0;let d=o-r;return r+=T.setInt32LE(e,r,d),o}function ci(e){return e!=null&&typeof e=="object"&&"_bsontype"in e&&typeof e._bsontype=="string"}function kn(e,t={}){if(typeof e=="number"){let r=e<=Ct&&e>=zt,s=e<=Sn&&e>=Bn;if(t.relaxed||t.legacy)return e;if(Number.isInteger(e)&&!Object.is(e,-0)){if(r)return new ct(e);if(s)return t.useBigInt64?BigInt(e):p.fromNumber(e)}return new ft(e)}if(e==null||typeof e!="object")return e;if(e.$undefined)return null;let n=Object.keys(e).filter(r=>r.startsWith("$")&&e[r]!=null);for(let r=0;r<n.length;r++){let s=li[n[r]];if(s)return s.fromExtendedJSON(e,t)}if(e.$date!=null){let r=e.$date,s=new Date;if(t.legacy)if(typeof r=="number")s.setTime(r);else if(typeof r=="string")s.setTime(Date.parse(r));else if(typeof r=="bigint")s.setTime(Number(r));else throw new Tt(`Unrecognized type for EJSON date: ${typeof r}`);else if(typeof r=="string")s.setTime(Date.parse(r));else if(p.isLong(r))s.setTime(r.toNumber());else if(typeof r=="number"&&t.relaxed)s.setTime(r);else if(typeof r=="bigint")s.setTime(Number(r));else throw new Tt(`Unrecognized type for EJSON date: ${typeof r}`);return s}if(e.$code!=null){let r=Object.assign({},e);return e.$scope&&(r.$scope=kn(e.$scope)),et.fromExtendedJSON(e)}if(Pn(e)||e.$dbPointer){let r=e.$ref?e:e.$dbPointer;if(r instanceof K)return r;let s=Object.keys(r).filter(f=>f.startsWith("$")),i=!0;if(s.forEach(f=>{["$ref","$id","$db"].indexOf(f)===-1&&(i=!1)}),i)return K.fromExtendedJSON(r)}return e}function ai(e,t){return e.map((n,r)=>{t.seenObjects.push({propertyName:`index ${r}`,obj:null});try{return v(n,t)}finally{t.seenObjects.pop()}})}function bn(e){let t=e.toISOString();return e.getUTCMilliseconds()!==0?t:t.slice(0,-5)+"Z"}function v(e,t){if(e instanceof Map||je(e)){let n=Object.create(null);for(let[r,s]of e){if(typeof r!="string")throw new h("Can only serialize maps with string keys");n[r]=s}return v(n,t)}if((typeof e=="object"||typeof e=="function")&&e!==null){let n=t.seenObjects.findIndex(r=>r.obj===e);if(n!==-1){let r=t.seenObjects.map(g=>g.propertyName),s=r.slice(0,n).map(g=>`${g} -> `).join(""),i=r[n],f=" -> "+r.slice(n+1,r.length-1).map(g=>`${g} -> `).join(""),l=r[r.length-1],o=" ".repeat(s.length+i.length/2),d="-".repeat(f.length+(i.length+l.length)/2-1);throw new h(`Converting circular structure to EJSON:
+    ${s}${i}${f}${l}
+    ${o}\\${d}/`)}t.seenObjects[t.seenObjects.length-1].obj=e}if(Array.isArray(e))return ai(e,t);if(e===void 0)return null;if(e instanceof Date||Nt(e)){let n=e.getTime(),r=n>-1&&n<2534023188e5;return t.legacy?t.relaxed&&r?{$date:e.getTime()}:{$date:bn(e)}:t.relaxed&&r?{$date:bn(e)}:{$date:{$numberLong:e.getTime().toString()}}}if(typeof e=="number"&&(!t.relaxed||!isFinite(e))){if(Number.isInteger(e)&&!Object.is(e,-0)){if(e>=zt&&e<=Ct)return{$numberInt:e.toString()};if(e>=Bn&&e<=Sn)return{$numberLong:e.toString()}}return{$numberDouble:Object.is(e,-0)?"-0.0":e.toString()}}if(typeof e=="bigint")return t.relaxed?Number(BigInt.asIntN(64,e)):{$numberLong:BigInt.asIntN(64,e).toString()};if(e instanceof RegExp||Bt(e)){let n=e.flags;if(n===void 0){let s=e.toString().match(/[gimuy]*$/);s&&(n=s[0])}return new rt(e.source,n).toExtendedJSON(t)}return e!=null&&typeof e=="object"?hi(e,t):e}function hi(e,t){if(e==null||typeof e!="object")throw new h("not an object instance");let n=e._bsontype;if(typeof n>"u"){let r={};for(let s of Object.keys(e)){t.seenObjects.push({propertyName:s,obj:null});try{let i=v(e[s],t);s==="__proto__"?Object.defineProperty(r,s,{value:i,writable:!0,enumerable:!0,configurable:!0}):r[s]=i}finally{t.seenObjects.pop()}}return r}else{if(e!=null&&typeof e=="object"&&typeof e._bsontype=="string"&&e[It]!==ht)throw new tt;if(ci(e)){let r=e;if(typeof r.toExtendedJSON!="function"){let s=ui[e._bsontype];if(!s)throw new h("Unrecognized or invalid _bsontype: "+e._bsontype);r=s(r)}return n==="Code"&&r.scope?r=new et(r.code,v(r.scope,t)):n==="DBRef"&&r.oid&&(r=new K(v(r.collection,t),v(r.oid,t),v(r.db,t),v(r.fields,t))),r.toExtendedJSON(t)}else throw new h("_bsontype must be a string, but was: "+typeof n)}}function Vn(e,t){let n={useBigInt64:t?.useBigInt64??!1,relaxed:t?.relaxed??!0,legacy:t?.legacy??!1};return JSON.parse(e,(r,s)=>{if(r.indexOf("\0")!==-1)throw new h(`BSON Document field names cannot contain null bytes, found: ${JSON.stringify(r)}`);return kn(s,n)})}function Hn(e,t,n,r){n!=null&&typeof n=="object"&&(r=n,n=0),t!=null&&typeof t=="object"&&!Array.isArray(t)&&(r=t,t=void 0,n=0);let s=Object.assign({relaxed:!0,legacy:!1},r,{seenObjects:[{propertyName:"(root)",obj:null}]}),i=v(e,s);return JSON.stringify(i,t,n)}function gi(e,t){return t=t||{},JSON.parse(Hn(e,t))}function yi(e,t){return t=t||{},Vn(JSON.stringify(e),t)}function xe(e,t){try{return T.getNonnegativeInt32LE(e,t)}catch(n){throw new H("BSON size cannot be negative",t,{cause:n})}}function De(e,t){let n=t;for(;e[n]!==0;n++);if(n===e.length-1)throw new H("Null terminator not found",t);return n}function mi(e,t=0){if(t??=0,e.length<5)throw new H(`Input must be at least 5 bytes, got ${e.length} bytes`,t);let n=xe(e,t);if(n>e.length-t)throw new H(`Parsed documentSize (${n} bytes) does not match input length (${e.length} bytes)`,t);if(e[t+n-1]!==0)throw new H("BSON documents must end in 0x00",t+n);let r=[],s=t+4;for(;s<=n+t;){let i=e[s];if(s+=1,i===0){if(s-t!==n)throw new H("Invalid 0x00 type byte",s);break}let f=s,l=De(e,s)-f;s+=l+1;let o;if(i===D.double||i===D.long||i===D.date||i===D.timestamp)o=8;else if(i===D.int)o=4;else if(i===D.objectId)o=12;else if(i===D.decimal)o=16;else if(i===D.bool)o=1;else if(i===D.null||i===D.undefined||i===D.maxKey||i===D.minKey)o=0;else if(i===D.regex)o=De(e,De(e,s)+1)+1-s;else if(i===D.object||i===D.array||i===D.javascriptWithScope)o=xe(e,s);else if(i===D.string||i===D.binData||i===D.dbPointer||i===D.javascript||i===D.symbol)o=xe(e,s)+4,i===D.binData&&(o+=1),i===D.dbPointer&&(o+=12);else throw new H(`Invalid 0x${i.toString(16).padStart(2,"0")} type byte`,s);if(o>n)throw new H("value reports length larger than document",s);r.push([i,f,l,s,o]),s+=o}return r}function Yn(e){it.length<e&&(it=u.allocate(e))}function Wn(e,t={}){let n=typeof t.checkKeys=="boolean"?t.checkKeys:!1,r=typeof t.serializeFunctions=="boolean"?t.serializeFunctions:!1,s=typeof t.ignoreUndefined=="boolean"?t.ignoreUndefined:!0,i=typeof t.minInternalBufferSize=="number"?t.minInternalBufferSize:Jn;it.length<i&&(it=u.allocate(i));let f=Pt(it,e,n,0,0,r,s,null),l=u.allocateUnsafe(f);return l.set(it.subarray(0,f),0),l}function Zn(e,t,n={}){let r=typeof n.checkKeys=="boolean"?n.checkKeys:!1,s=typeof n.serializeFunctions=="boolean"?n.serializeFunctions:!1,i=typeof n.ignoreUndefined=="boolean"?n.ignoreUndefined:!0,f=typeof n.index=="number"?n.index:0,l=Pt(it,e,r,0,0,s,i,null);return t.set(it.subarray(0,l),f),f+l-1}function Kn(e,t={}){return qn(u.toLocalBufferType(e),t)}function Gn(e,t={}){t=t||{};let n=typeof t.serializeFunctions=="boolean"?t.serializeFunctions:!1,r=typeof t.ignoreUndefined=="boolean"?t.ignoreUndefined:!0;return Yt(e,n,r)}function Xn(e,t,n,r,s,i){let f=Object.assign({allowObjectSmallerThanBufferSize:!0,index:0},i),l=u.toLocalBufferType(e),o=t;for(let d=0;d<n;d++){let g=T.getInt32LE(l,o);f.index=o,r[s+d]=qn(l,f),o=o+g}return o}var As,ht,It,Ct,zt,Sn,Bn,Nn,On,Ce,En,ze,In,Pe,Ls,Tn,$n,An,Fe,Zt,Us,Me,_n,Ln,Rt,Un,qe,xn,Dn,Rn,xs,ke,jn,h,tt,Tt,H,sn,on,js,Q,Ps,fn,jt,Fs,u,F,Ot,U,le,T,_,ae,Ms,qs,ot,et,K,V,cn,Vs,Et,Mn,Hs,ln,an,Js,Ys,p,Ws,Zs,Ks,pt,xt,un,hn,ue,gn,yn,Gs,Xs,mn,Qs,vs,gt,ft,ct,yt,mt,ut,Dt,nt,rt,dt,si,lt,ii,oi,fi,Kt,pn,li,ui,wt,D,$t,Jn,it,di,Mt=Is(()=>{As=(()=>{let e=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),Symbol.toStringTag).get;return t=>e.call(t)})();c(St,"isUint8Array");c(Re,"isAnyArrayBuffer");c(Bt,"isRegExp");c(je,"isMap");c(Nt,"isDate");c(M,"defaultInspect");c(_s,"getStylizeFunction");ht=6,It=Symbol.for("@@mdb.bson.version"),Ct=2147483647,zt=-2147483648,Sn=Math.pow(2,63)-1,Bn=-Math.pow(2,63),Nn=Math.pow(2,53),On=-Math.pow(2,53),Ce=1,En=2,ze=3,In=4,Pe=5,Ls=6,Tn=7,$n=8,An=9,Fe=10,Zt=11,Us=12,Me=13,_n=14,Ln=15,Rt=16,Un=17,qe=18,xn=19,Dn=255,Rn=127,xs=0,ke=4,jn=Object.freeze({double:1,string:2,object:3,array:4,binData:5,undefined:6,objectId:7,bool:8,date:9,null:10,regex:11,dbPointer:12,javascript:13,symbol:14,javascriptWithScope:15,int:16,timestamp:17,long:18,decimal:19,minKey:-1,maxKey:127}),h=class extends Error{static{c(this,"BSONError")}get bsonError(){return!0}get name(){return"BSONError"}constructor(t,n){super(t,n)}static isBSONError(t){return t!=null&&typeof t=="object"&&"bsonError"in t&&t.bsonError===!0&&"name"in t&&"message"in t&&"stack"in t}},tt=class extends h{static{c(this,"BSONVersionError")}get name(){return"BSONVersionError"}constructor(){super(`Unsupported BSON version, bson types must be from bson ${ht}.x.x`)}},Tt=class extends h{static{c(this,"BSONRuntimeError")}get name(){return"BSONRuntimeError"}constructor(t){super(t)}},H=class extends h{static{c(this,"BSONOffsetError")}get name(){return"BSONOffsetError"}constructor(t,n,r){super(`${t}. offset: ${n}`,r),this.offset=n}};c(Cn,"parseUtf8");c(zn,"tryReadBasicLatin");c(Ds,"tryWriteBasicLatin");c(Rs,"nodejsMathRandomBytes");js=Rs,Q={toLocalBufferType(e){if(Buffer.isBuffer(e))return e;if(ArrayBuffer.isView(e))return Buffer.from(e.buffer,e.byteOffset,e.byteLength);let t=e?.[Symbol.toStringTag]??Object.prototype.toString.call(e);if(t==="ArrayBuffer"||t==="SharedArrayBuffer"||t==="[object ArrayBuffer]"||t==="[object SharedArrayBuffer]")return Buffer.from(e);throw new h("Cannot create Buffer from the passed potentialBuffer.")},allocate(e){return Buffer.alloc(e)},allocateUnsafe(e){return Buffer.allocUnsafe(e)},equals(e,t){return Q.toLocalBufferType(e).equals(t)},fromNumberArray(e){return Buffer.from(e)},fromBase64(e){return Buffer.from(e,"base64")},toBase64(e){return Q.toLocalBufferType(e).toString("base64")},fromISO88591(e){return Buffer.from(e,"binary")},toISO88591(e){return Q.toLocalBufferType(e).toString("binary")},fromHex(e){return Buffer.from(e,"hex")},toHex(e){return Q.toLocalBufferType(e).toString("hex")},toUTF8(e,t,n,r){let s=n-t<=20?zn(e,t,n):null;if(s!=null)return s;let i=Q.toLocalBufferType(e).toString("utf8",t,n);if(r){for(let f=0;f<i.length;f++)if(i.charCodeAt(f)===65533){Cn(e,t,n,!0);break}}return i},utf8ByteLength(e){return Buffer.byteLength(e,"utf8")},encodeUTF8Into(e,t,n){let r=Ds(e,t,n);return r??Q.toLocalBufferType(e).write(t,n,void 0,"utf8")},randomBytes:js,swap32(e){return Q.toLocalBufferType(e).swap32()}};c(Cs,"isReactNative");c(zs,"webMathRandomBytes");Ps=(()=>{let{crypto:e}=globalThis;if(e!=null&&typeof e.getRandomValues=="function")return t=>e.getRandomValues(jt.allocate(t));if(Cs()){let{console:t}=globalThis;t?.warn?.("BSON: For React Native please polyfill crypto.getRandomValues, e.g. using: https://www.npmjs.com/package/react-native-get-random-values.")}return zs})(),fn=/(\d|[a-f])/i,jt={toLocalBufferType(e){let t=e?.[Symbol.toStringTag]??Object.prototype.toString.call(e);if(t==="Uint8Array")return e;if(ArrayBuffer.isView(e))return new Uint8Array(e.buffer.slice(e.byteOffset,e.byteOffset+e.byteLength));if(t==="ArrayBuffer"||t==="SharedArrayBuffer"||t==="[object ArrayBuffer]"||t==="[object SharedArrayBuffer]")return new Uint8Array(e);throw new h("Cannot make a Uint8Array from passed potentialBuffer.")},allocate(e){if(typeof e!="number")throw new TypeError(`The "size" argument must be of type number. Received ${String(e)}`);return new Uint8Array(e)},allocateUnsafe(e){return jt.allocate(e)},equals(e,t){if(e.byteLength!==t.byteLength)return!1;for(let n=0;n<e.byteLength;n++)if(e[n]!==t[n])return!1;return!0},fromNumberArray(e){return Uint8Array.from(e)},fromBase64(e){return Uint8Array.from(atob(e),t=>t.charCodeAt(0))},toBase64(e){return btoa(jt.toISO88591(e))},fromISO88591(e){return Uint8Array.from(e,t=>t.charCodeAt(0)&255)},toISO88591(e){return Array.from(Uint16Array.from(e),t=>String.fromCharCode(t)).join("")},fromHex(e){let t=e.length%2===0?e:e.slice(0,e.length-1),n=[];for(let r=0;r<t.length;r+=2){let s=t[r],i=t[r+1];if(!fn.test(s)||!fn.test(i))break;let f=Number.parseInt(`${s}${i}`,16);n.push(f)}return Uint8Array.from(n)},toHex(e){return Array.from(e,t=>t.toString(16).padStart(2,"0")).join("")},toUTF8(e,t,n,r){let s=n-t<=20?zn(e,t,n):null;return s??Cn(e,t,n,r)},utf8ByteLength(e){return new TextEncoder().encode(e).byteLength},encodeUTF8Into(e,t,n){let r=new TextEncoder().encode(t);return e.set(r,n),r.byteLength},randomBytes:Ps,swap32(e){if(e.length%4!==0)throw new RangeError("Buffer size must be a multiple of 32-bits");for(let t=0;t<e.length;t+=4){let n=e[t],r=e[t+1],s=e[t+2],i=e[t+3];e[t]=i,e[t+1]=s,e[t+2]=r,e[t+3]=n}return e}},Fs=typeof Buffer=="function"&&Buffer.prototype?._isBuffer!==!0,u=Fs?Q:jt,F=class{static{c(this,"BSONValue")}get[It](){return ht}[Symbol.for("nodejs.util.inspect.custom")](t,n,r){return this.inspect(t,n,r)}},Ot=new Float64Array(1),U=new Uint8Array(Ot.buffer,0,8);Ot[0]=-1;le=U[7]===0,T={isBigEndian:le,getNonnegativeInt32LE(e,t){if(e[t+3]>127)throw new RangeError(`Size cannot be negative at offset: ${t}`);return e[t]|e[t+1]<<8|e[t+2]<<16|e[t+3]<<24},getInt32LE(e,t){return e[t]|e[t+1]<<8|e[t+2]<<16|e[t+3]<<24},getUint32LE(e,t){return e[t]+e[t+1]*256+e[t+2]*65536+e[t+3]*16777216},getUint32BE(e,t){return e[t+3]+e[t+2]*256+e[t+1]*65536+e[t]*16777216},getBigInt64LE(e,t){let n=BigInt(e[t+4]+e[t+5]*256+e[t+6]*65536+(e[t+7]<<24)),r=BigInt(e[t]+e[t+1]*256+e[t+2]*65536+e[t+3]*16777216);return(n<<BigInt(32))+r},getFloat64LE:le?(e,t)=>(U[7]=e[t],U[6]=e[t+1],U[5]=e[t+2],U[4]=e[t+3],U[3]=e[t+4],U[2]=e[t+5],U[1]=e[t+6],U[0]=e[t+7],Ot[0]):(e,t)=>(U[0]=e[t],U[1]=e[t+1],U[2]=e[t+2],U[3]=e[t+3],U[4]=e[t+4],U[5]=e[t+5],U[6]=e[t+6],U[7]=e[t+7],Ot[0]),setInt32BE(e,t,n){return e[t+3]=n,n>>>=8,e[t+2]=n,n>>>=8,e[t+1]=n,n>>>=8,e[t]=n,4},setInt32LE(e,t,n){return e[t]=n,n>>>=8,e[t+1]=n,n>>>=8,e[t+2]=n,n>>>=8,e[t+3]=n,4},setBigInt64LE(e,t,n){let r=BigInt(4294967295),s=Number(n&r);e[t]=s,s>>=8,e[t+1]=s,s>>=8,e[t+2]=s,s>>=8,e[t+3]=s;let i=Number(n>>BigInt(32)&r);return e[t+4]=i,i>>=8,e[t+5]=i,i>>=8,e[t+6]=i,i>>=8,e[t+7]=i,8},setFloat64LE:le?(e,t,n)=>(Ot[0]=n,e[t]=U[7],e[t+1]=U[6],e[t+2]=U[5],e[t+3]=U[4],e[t+4]=U[3],e[t+5]=U[2],e[t+6]=U[1],e[t+7]=U[0],8):(e,t,n)=>(Ot[0]=n,e[t]=U[0],e[t+1]=U[1],e[t+2]=U[2],e[t+3]=U[3],e[t+4]=U[4],e[t+5]=U[5],e[t+6]=U[6],e[t+7]=U[7],8)},_=class e extends F{static{c(this,"Binary")}get _bsontype(){return"Binary"}constructor(t,n){if(super(),t!=null&&typeof t=="string"&&!ArrayBuffer.isView(t)&&!Re(t)&&!Array.isArray(t))throw new h("Binary can only be constructed from Uint8Array or number[]");this.sub_type=n??e.BSON_BINARY_SUBTYPE_DEFAULT,t==null?(this.buffer=u.allocate(e.BUFFER_SIZE),this.position=0):(this.buffer=Array.isArray(t)?u.fromNumberArray(t):u.toLocalBufferType(t),this.position=this.buffer.byteLength)}put(t){if(typeof t=="string"&&t.length!==1)throw new h("only accepts single character String");if(typeof t!="number"&&t.length!==1)throw new h("only accepts single character Uint8Array or Array");let n;if(typeof t=="string"?n=t.charCodeAt(0):typeof t=="number"?n=t:n=t[0],n<0||n>255)throw new h("only accepts number in a valid unsigned byte range 0-255");if(this.buffer.byteLength>this.position)this.buffer[this.position++]=n;else{let r=u.allocate(e.BUFFER_SIZE+this.buffer.length);r.set(this.buffer,0),this.buffer=r,this.buffer[this.position++]=n}}write(t,n){if(n=typeof n=="number"?n:this.position,this.buffer.byteLength<n+t.length){let r=u.allocate(this.buffer.byteLength+t.length);r.set(this.buffer,0),this.buffer=r}if(ArrayBuffer.isView(t))this.buffer.set(u.toLocalBufferType(t),n),this.position=n+t.byteLength>this.position?n+t.length:this.position;else if(typeof t=="string")throw new h("input cannot be string")}read(t,n){n=n&&n>0?n:this.position;let r=t+n;return this.buffer.subarray(t,r>this.position?this.position:r)}value(){return this.buffer.length===this.position?this.buffer:this.buffer.subarray(0,this.position)}length(){return this.position}toJSON(){return u.toBase64(this.buffer.subarray(0,this.position))}toString(t){return t==="hex"?u.toHex(this.buffer.subarray(0,this.position)):t==="base64"?u.toBase64(this.buffer.subarray(0,this.position)):t==="utf8"||t==="utf-8"?u.toUTF8(this.buffer,0,this.position,!1):u.toUTF8(this.buffer,0,this.position,!1)}toExtendedJSON(t){t=t||{},this.sub_type===e.SUBTYPE_VECTOR&&X(this);let n=u.toBase64(this.buffer),r=Number(this.sub_type).toString(16);return t.legacy?{$binary:n,$type:r.length===1?"0"+r:r}:{$binary:{base64:n,subType:r.length===1?"0"+r:r}}}toUUID(){if(this.sub_type===e.SUBTYPE_UUID)return new ot(this.buffer.subarray(0,this.position));throw new h(`Binary sub_type "${this.sub_type}" is not supported for converting to UUID. Only "${e.SUBTYPE_UUID}" is currently supported.`)}static createFromHexString(t,n){return new e(u.fromHex(t),n)}static createFromBase64(t,n){return new e(u.fromBase64(t),n)}static fromExtendedJSON(t,n){n=n||{};let r,s;if("$binary"in t?n.legacy&&typeof t.$binary=="string"&&"$type"in t?(s=t.$type?parseInt(t.$type,16):0,r=u.fromBase64(t.$binary)):typeof t.$binary!="string"&&(s=t.$binary.subType?parseInt(t.$binary.subType,16):0,r=u.fromBase64(t.$binary.base64)):"$uuid"in t&&(s=4,r=ot.bytesFromString(t.$uuid)),!r)throw new h(`Unexpected Binary Extended JSON format ${JSON.stringify(t)}`);return s===ke?new ot(r):new e(r,s)}inspect(t,n,r){r??=M;let s=u.toBase64(this.buffer.subarray(0,this.position)),i=r(s,n),f=r(this.sub_type,n);return`Binary.createFromBase64(${i}, ${f})`}toInt8Array(){if(this.sub_type!==e.SUBTYPE_VECTOR)throw new h("Binary sub_type is not Vector");if(this.buffer[0]!==e.VECTOR_TYPE.Int8)throw new h("Binary datatype field is not Int8");return X(this),new Int8Array(this.buffer.buffer.slice(this.buffer.byteOffset+2,this.buffer.byteOffset+this.position))}toFloat32Array(){if(this.sub_type!==e.SUBTYPE_VECTOR)throw new h("Binary sub_type is not Vector");if(this.buffer[0]!==e.VECTOR_TYPE.Float32)throw new h("Binary datatype field is not Float32");X(this);let t=new Uint8Array(this.buffer.buffer.slice(this.buffer.byteOffset+2,this.buffer.byteOffset+this.position));return T.isBigEndian&&u.swap32(t),new Float32Array(t.buffer)}toPackedBits(){if(this.sub_type!==e.SUBTYPE_VECTOR)throw new h("Binary sub_type is not Vector");if(this.buffer[0]!==e.VECTOR_TYPE.PackedBit)throw new h("Binary datatype field is not packed bit");return X(this),new Uint8Array(this.buffer.buffer.slice(this.buffer.byteOffset+2,this.buffer.byteOffset+this.position))}toBits(){if(this.sub_type!==e.SUBTYPE_VECTOR)throw new h("Binary sub_type is not Vector");if(this.buffer[0]!==e.VECTOR_TYPE.PackedBit)throw new h("Binary datatype field is not packed bit");X(this);let n=(this.length()-2)*8-this.buffer[1],r=new Int8Array(n);for(let s=0;s<r.length;s++){let i=s/8|0,f=this.buffer[i+2],l=7-s%8,o=f>>l&1;r[s]=o}return r}static fromInt8Array(t){let n=u.allocate(t.byteLength+2);n[0]=e.VECTOR_TYPE.Int8,n[1]=0;let r=new Uint8Array(t.buffer,t.byteOffset,t.byteLength);n.set(r,2);let s=new this(n,this.SUBTYPE_VECTOR);return X(s),s}static fromFloat32Array(t){let n=u.allocate(t.byteLength+2);n[0]=e.VECTOR_TYPE.Float32,n[1]=0;let r=new Uint8Array(t.buffer,t.byteOffset,t.byteLength);n.set(r,2),T.isBigEndian&&u.swap32(new Uint8Array(n.buffer,2));let s=new this(n,this.SUBTYPE_VECTOR);return X(s),s}static fromPackedBits(t,n=0){let r=u.allocate(t.byteLength+2);r[0]=e.VECTOR_TYPE.PackedBit,r[1]=n,r.set(t,2);let s=new this(r,this.SUBTYPE_VECTOR);return X(s),s}static fromBits(t){let n=t.length+7>>>3,r=new Uint8Array(n+2);r[0]=e.VECTOR_TYPE.PackedBit;let s=t.length%8;r[1]=s===0?0:8-s;for(let i=0;i<t.length;i++){let f=i>>>3,l=t[i];if(l!==0&&l!==1)throw new h(`Invalid bit value at ${i}: must be 0 or 1, found ${t[i]}`);if(l===0)continue;let o=7-i%8;r[f+2]|=l<<o}return new this(r,e.SUBTYPE_VECTOR)}};_.BSON_BINARY_SUBTYPE_DEFAULT=0;_.BUFFER_SIZE=256;_.SUBTYPE_DEFAULT=0;_.SUBTYPE_FUNCTION=1;_.SUBTYPE_BYTE_ARRAY=2;_.SUBTYPE_UUID_OLD=3;_.SUBTYPE_UUID=4;_.SUBTYPE_MD5=5;_.SUBTYPE_ENCRYPTED=6;_.SUBTYPE_COLUMN=7;_.SUBTYPE_SENSITIVE=8;_.SUBTYPE_VECTOR=9;_.SUBTYPE_USER_DEFINED=128;_.VECTOR_TYPE=Object.freeze({Int8:3,Float32:39,PackedBit:16});c(X,"validateBinaryVector");ae=16,Ms=/^[0-9A-F]{32}$/i,qs=/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i,ot=class e extends _{static{c(this,"UUID")}constructor(t){let n;if(t==null)n=e.generate();else if(t instanceof e)n=u.toLocalBufferType(new Uint8Array(t.buffer));else if(ArrayBuffer.isView(t)&&t.byteLength===ae)n=u.toLocalBufferType(t);else if(typeof t=="string")n=e.bytesFromString(t);else throw new h("Argument passed in UUID constructor must be a UUID, a 16 byte Buffer or a 32/36 character hex string (dashes excluded/included, format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");super(n,ke)}get id(){return this.buffer}set id(t){this.buffer=t}toHexString(t=!0){return t?[u.toHex(this.buffer.subarray(0,4)),u.toHex(this.buffer.subarray(4,6)),u.toHex(this.buffer.subarray(6,8)),u.toHex(this.buffer.subarray(8,10)),u.toHex(this.buffer.subarray(10,16))].join("-"):u.toHex(this.buffer)}toString(t){return t==="hex"?u.toHex(this.id):t==="base64"?u.toBase64(this.id):this.toHexString()}toJSON(){return this.toHexString()}equals(t){if(!t)return!1;if(t instanceof e)return u.equals(t.id,this.id);try{return u.equals(new e(t).id,this.id)}catch{return!1}}toBinary(){return new _(this.id,_.SUBTYPE_UUID)}static generate(){let t=u.randomBytes(ae);return t[6]=t[6]&15|64,t[8]=t[8]&63|128,t}static isValid(t){return t?typeof t=="string"?e.isValidUUIDString(t):St(t)?t.byteLength===ae:t._bsontype==="Binary"&&t.sub_type===this.SUBTYPE_UUID&&t.buffer.byteLength===16:!1}static createFromHexString(t){let n=e.bytesFromString(t);return new e(n)}static createFromBase64(t){return new e(u.fromBase64(t))}static bytesFromString(t){if(!e.isValidUUIDString(t))throw new h("UUID string representation must be 32 hex digits or canonical hyphenated representation");return u.fromHex(t.replace(/-/g,""))}static isValidUUIDString(t){return Ms.test(t)||qs.test(t)}inspect(t,n,r){return r??=M,`new UUID(${r(this.toHexString(),n)})`}},et=class e extends F{static{c(this,"Code")}get _bsontype(){return"Code"}constructor(t,n){super(),this.code=t.toString(),this.scope=n??null}toJSON(){return this.scope!=null?{code:this.code,scope:this.scope}:{code:this.code}}toExtendedJSON(){return this.scope?{$code:this.code,$scope:this.scope}:{$code:this.code}}static fromExtendedJSON(t){return new e(t.$code,t.$scope)}inspect(t,n,r){r??=M;let s=r(this.code,n),i=s.includes(`
+`);this.scope!=null&&(s+=`,${i?`
+`:" "}${r(this.scope,n)}`);let f=i&&this.scope===null;return`new Code(${i?`
+`:""}${s}${f?`
+`:""})`}};c(Pn,"isDBRefLike");K=class e extends F{static{c(this,"DBRef")}get _bsontype(){return"DBRef"}constructor(t,n,r,s){super();let i=t.split(".");i.length===2&&(r=i.shift(),t=i.shift()),this.collection=t,this.oid=n,this.db=r,this.fields=s||{}}get namespace(){return this.collection}set namespace(t){this.collection=t}toJSON(){let t=Object.assign({$ref:this.collection,$id:this.oid},this.fields);return this.db!=null&&(t.$db=this.db),t}toExtendedJSON(t){t=t||{};let n={$ref:this.collection,$id:this.oid};return t.legacy||(this.db&&(n.$db=this.db),n=Object.assign(n,this.fields)),n}static fromExtendedJSON(t){let n=Object.assign({},t);return delete n.$ref,delete n.$id,delete n.$db,new e(t.$ref,t.$id,t.$db,n)}inspect(t,n,r){r??=M;let s=[r(this.namespace,n),r(this.oid,n),...this.db?[r(this.db,n)]:[],...Object.keys(this.fields).length>0?[r(this.fields,n)]:[]];return s[1]=r===M?`new ObjectId(${s[1]})`:s[1],`new DBRef(${s.join(", ")})`}};c(Fn,"removeLeadingZerosAndExplicitPlus");c(ks,"validateStringCharacters");try{V=new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,13,2,96,0,1,127,96,4,127,127,127,127,1,127,3,7,6,0,1,1,1,1,1,6,6,1,127,1,65,0,11,7,50,6,3,109,117,108,0,1,5,100,105,118,95,115,0,2,5,100,105,118,95,117,0,3,5,114,101,109,95,115,0,4,5,114,101,109,95,117,0,5,8,103,101,116,95,104,105,103,104,0,0,10,191,1,6,4,0,35,0,11,36,1,1,126,32,0,173,32,1,173,66,32,134,132,32,2,173,32,3,173,66,32,134,132,126,34,4,66,32,135,167,36,0,32,4,167,11,36,1,1,126,32,0,173,32,1,173,66,32,134,132,32,2,173,32,3,173,66,32,134,132,127,34,4,66,32,135,167,36,0,32,4,167,11,36,1,1,126,32,0,173,32,1,173,66,32,134,132,32,2,173,32,3,173,66,32,134,132,128,34,4,66,32,135,167,36,0,32,4,167,11,36,1,1,126,32,0,173,32,1,173,66,32,134,132,32,2,173,32,3,173,66,32,134,132,129,34,4,66,32,135,167,36,0,32,4,167,11,36,1,1,126,32,0,173,32,1,173,66,32,134,132,32,2,173,32,3,173,66,32,134,132,130,34,4,66,32,135,167,36,0,32,4,167,11])),{}).exports}catch{}cn=65536,Vs=1<<24,Et=cn*cn,Mn=Et*Et,Hs=Mn/2,ln={},an={},Js=20,Ys=/^(\+?0|(\+|-)?[1-9][0-9]*)$/,p=class e extends F{static{c(this,"Long")}get _bsontype(){return"Long"}get __isLong__(){return!0}constructor(t=0,n,r){super();let s=typeof n=="boolean"?n:!!r,i=typeof n=="number"?n:0,f=typeof t=="string"?e.fromString(t,s):typeof t=="bigint"?e.fromBigInt(t,s):{low:t|0,high:i|0,unsigned:s};this.low=f.low,this.high=f.high,this.unsigned=f.unsigned}static fromBits(t,n,r){return new e(t,n,r)}static fromInt(t,n){let r,s,i;return n?(t>>>=0,(i=0<=t&&t<256)&&(s=an[t],s)?s:(r=e.fromBits(t,(t|0)<0?-1:0,!0),i&&(an[t]=r),r)):(t|=0,(i=-128<=t&&t<128)&&(s=ln[t],s)?s:(r=e.fromBits(t,t<0?-1:0,!1),i&&(ln[t]=r),r))}static fromNumber(t,n){if(isNaN(t))return n?e.UZERO:e.ZERO;if(n){if(t<0)return e.UZERO;if(t>=Mn)return e.MAX_UNSIGNED_VALUE}else{if(t<=-9223372036854776e3)return e.MIN_VALUE;if(t+1>=Hs)return e.MAX_VALUE}return t<0?e.fromNumber(-t,n).neg():e.fromBits(t%Et|0,t/Et|0,n)}static fromBigInt(t,n){let r=BigInt(4294967295),s=BigInt(32);return new e(Number(t&r),Number(t>>s&r),n)}static _fromString(t,n,r){if(t.length===0)throw new h("empty string");if(r<2||36<r)throw new h("radix");let s;if((s=t.indexOf("-"))>0)throw new h("interior hyphen");if(s===0)return e._fromString(t.substring(1),n,r).neg();let i=e.fromNumber(Math.pow(r,8)),f=e.ZERO;for(let l=0;l<t.length;l+=8){let o=Math.min(8,t.length-l),d=parseInt(t.substring(l,l+o),r);if(o<8){let g=e.fromNumber(Math.pow(r,o));f=f.mul(g).add(e.fromNumber(d))}else f=f.mul(i),f=f.add(e.fromNumber(d))}return f.unsigned=n,f}static fromStringStrict(t,n,r){let s=!1;if(typeof n=="number"?(r=n,n=!1):s=!!n,r??=10,t.trim()!==t)throw new h(`Input: '${t}' contains leading and/or trailing whitespace`);if(!ks(t,r))throw new h(`Input: '${t}' contains invalid characters for radix: ${r}`);let i=Fn(t),f=e._fromString(i,s,r);if(f.toString(r).toLowerCase()!==i.toLowerCase())throw new h(`Input: ${t} is not representable as ${f.unsigned?"an unsigned":"a signed"} 64-bit Long ${r!=null?`with radix: ${r}`:""}`);return f}static fromString(t,n,r){let s=!1;return typeof n=="number"?(r=n,n=!1):s=!!n,r??=10,t==="NaN"&&r<24||(t==="Infinity"||t==="+Infinity"||t==="-Infinity")&&r<35?e.ZERO:e._fromString(t,s,r)}static fromBytes(t,n,r){return r?e.fromBytesLE(t,n):e.fromBytesBE(t,n)}static fromBytesLE(t,n){return new e(t[0]|t[1]<<8|t[2]<<16|t[3]<<24,t[4]|t[5]<<8|t[6]<<16|t[7]<<24,n)}static fromBytesBE(t,n){return new e(t[4]<<24|t[5]<<16|t[6]<<8|t[7],t[0]<<24|t[1]<<16|t[2]<<8|t[3],n)}static isLong(t){return t!=null&&typeof t=="object"&&"__isLong__"in t&&t.__isLong__===!0}static fromValue(t,n){return typeof t=="number"?e.fromNumber(t,n):typeof t=="string"?e.fromString(t,n):e.fromBits(t.low,t.high,typeof n=="boolean"?n:t.unsigned)}add(t){e.isLong(t)||(t=e.fromValue(t));let n=this.high>>>16,r=this.high&65535,s=this.low>>>16,i=this.low&65535,f=t.high>>>16,l=t.high&65535,o=t.low>>>16,d=t.low&65535,g=0,a=0,y=0,w=0;return w+=i+d,y+=w>>>16,w&=65535,y+=s+o,a+=y>>>16,y&=65535,a+=r+l,g+=a>>>16,a&=65535,g+=n+f,g&=65535,e.fromBits(y<<16|w,g<<16|a,this.unsigned)}and(t){return e.isLong(t)||(t=e.fromValue(t)),e.fromBits(this.low&t.low,this.high&t.high,this.unsigned)}compare(t){if(e.isLong(t)||(t=e.fromValue(t)),this.eq(t))return 0;let n=this.isNegative(),r=t.isNegative();return n&&!r?-1:!n&&r?1:this.unsigned?t.high>>>0>this.high>>>0||t.high===this.high&&t.low>>>0>this.low>>>0?-1:1:this.sub(t).isNegative()?-1:1}comp(t){return this.compare(t)}divide(t){if(e.isLong(t)||(t=e.fromValue(t)),t.isZero())throw new h("division by zero");if(V){if(!this.unsigned&&this.high===-2147483648&&t.low===-1&&t.high===-1)return this;let i=(this.unsigned?V.div_u:V.div_s)(this.low,this.high,t.low,t.high);return e.fromBits(i,V.get_high(),this.unsigned)}if(this.isZero())return this.unsigned?e.UZERO:e.ZERO;let n,r,s;if(this.unsigned){if(t.unsigned||(t=t.toUnsigned()),t.gt(this))return e.UZERO;if(t.gt(this.shru(1)))return e.UONE;s=e.UZERO}else{if(this.eq(e.MIN_VALUE))return t.eq(e.ONE)||t.eq(e.NEG_ONE)?e.MIN_VALUE:t.eq(e.MIN_VALUE)?e.ONE:(n=this.shr(1).div(t).shl(1),n.eq(e.ZERO)?t.isNegative()?e.ONE:e.NEG_ONE:(r=this.sub(t.mul(n)),s=n.add(r.div(t)),s));if(t.eq(e.MIN_VALUE))return this.unsigned?e.UZERO:e.ZERO;if(this.isNegative())return t.isNegative()?this.neg().div(t.neg()):this.neg().div(t).neg();if(t.isNegative())return this.div(t.neg()).neg();s=e.ZERO}for(r=this;r.gte(t);){n=Math.max(1,Math.floor(r.toNumber()/t.toNumber()));let i=Math.ceil(Math.log(n)/Math.LN2),f=i<=48?1:Math.pow(2,i-48),l=e.fromNumber(n),o=l.mul(t);for(;o.isNegative()||o.gt(r);)n-=f,l=e.fromNumber(n,this.unsigned),o=l.mul(t);l.isZero()&&(l=e.ONE),s=s.add(l),r=r.sub(o)}return s}div(t){return this.divide(t)}equals(t){return e.isLong(t)||(t=e.fromValue(t)),this.unsigned!==t.unsigned&&this.high>>>31===1&&t.high>>>31===1?!1:this.high===t.high&&this.low===t.low}eq(t){return this.equals(t)}getHighBits(){return this.high}getHighBitsUnsigned(){return this.high>>>0}getLowBits(){return this.low}getLowBitsUnsigned(){return this.low>>>0}getNumBitsAbs(){if(this.isNegative())return this.eq(e.MIN_VALUE)?64:this.neg().getNumBitsAbs();let t=this.high!==0?this.high:this.low,n;for(n=31;n>0&&!(t&1<<n);n--);return this.high!==0?n+33:n+1}greaterThan(t){return this.comp(t)>0}gt(t){return this.greaterThan(t)}greaterThanOrEqual(t){return this.comp(t)>=0}gte(t){return this.greaterThanOrEqual(t)}ge(t){return this.greaterThanOrEqual(t)}isEven(){return(this.low&1)===0}isNegative(){return!this.unsigned&&this.high<0}isOdd(){return(this.low&1)===1}isPositive(){return this.unsigned||this.high>=0}isZero(){return this.high===0&&this.low===0}lessThan(t){return this.comp(t)<0}lt(t){return this.lessThan(t)}lessThanOrEqual(t){return this.comp(t)<=0}lte(t){return this.lessThanOrEqual(t)}modulo(t){if(e.isLong(t)||(t=e.fromValue(t)),V){let n=(this.unsigned?V.rem_u:V.rem_s)(this.low,this.high,t.low,t.high);return e.fromBits(n,V.get_high(),this.unsigned)}return this.sub(this.div(t).mul(t))}mod(t){return this.modulo(t)}rem(t){return this.modulo(t)}multiply(t){if(this.isZero())return e.ZERO;if(e.isLong(t)||(t=e.fromValue(t)),V){let m=V.mul(this.low,this.high,t.low,t.high);return e.fromBits(m,V.get_high(),this.unsigned)}if(t.isZero())return e.ZERO;if(this.eq(e.MIN_VALUE))return t.isOdd()?e.MIN_VALUE:e.ZERO;if(t.eq(e.MIN_VALUE))return this.isOdd()?e.MIN_VALUE:e.ZERO;if(this.isNegative())return t.isNegative()?this.neg().mul(t.neg()):this.neg().mul(t).neg();if(t.isNegative())return this.mul(t.neg()).neg();if(this.lt(e.TWO_PWR_24)&&t.lt(e.TWO_PWR_24))return e.fromNumber(this.toNumber()*t.toNumber(),this.unsigned);let n=this.high>>>16,r=this.high&65535,s=this.low>>>16,i=this.low&65535,f=t.high>>>16,l=t.high&65535,o=t.low>>>16,d=t.low&65535,g=0,a=0,y=0,w=0;return w+=i*d,y+=w>>>16,w&=65535,y+=s*d,a+=y>>>16,y&=65535,y+=i*o,a+=y>>>16,y&=65535,a+=r*d,g+=a>>>16,a&=65535,a+=s*o,g+=a>>>16,a&=65535,a+=i*l,g+=a>>>16,a&=65535,g+=n*d+r*o+s*l+i*f,g&=65535,e.fromBits(y<<16|w,g<<16|a,this.unsigned)}mul(t){return this.multiply(t)}negate(){return!this.unsigned&&this.eq(e.MIN_VALUE)?e.MIN_VALUE:this.not().add(e.ONE)}neg(){return this.negate()}not(){return e.fromBits(~this.low,~this.high,this.unsigned)}notEquals(t){return!this.equals(t)}neq(t){return this.notEquals(t)}ne(t){return this.notEquals(t)}or(t){return e.isLong(t)||(t=e.fromValue(t)),e.fromBits(this.low|t.low,this.high|t.high,this.unsigned)}shiftLeft(t){return e.isLong(t)&&(t=t.toInt()),(t&=63)===0?this:t<32?e.fromBits(this.low<<t,this.high<<t|this.low>>>32-t,this.unsigned):e.fromBits(0,this.low<<t-32,this.unsigned)}shl(t){return this.shiftLeft(t)}shiftRight(t){return e.isLong(t)&&(t=t.toInt()),(t&=63)===0?this:t<32?e.fromBits(this.low>>>t|this.high<<32-t,this.high>>t,this.unsigned):e.fromBits(this.high>>t-32,this.high>=0?0:-1,this.unsigned)}shr(t){return this.shiftRight(t)}shiftRightUnsigned(t){if(e.isLong(t)&&(t=t.toInt()),t&=63,t===0)return this;{let n=this.high;if(t<32){let r=this.low;return e.fromBits(r>>>t|n<<32-t,n>>>t,this.unsigned)}else return t===32?e.fromBits(n,0,this.unsigned):e.fromBits(n>>>t-32,0,this.unsigned)}}shr_u(t){return this.shiftRightUnsigned(t)}shru(t){return this.shiftRightUnsigned(t)}subtract(t){return e.isLong(t)||(t=e.fromValue(t)),this.add(t.neg())}sub(t){return this.subtract(t)}toInt(){return this.unsigned?this.low>>>0:this.low}toNumber(){return this.unsigned?(this.high>>>0)*Et+(this.low>>>0):this.high*Et+(this.low>>>0)}toBigInt(){return BigInt(this.toString())}toBytes(t){return t?this.toBytesLE():this.toBytesBE()}toBytesLE(){let t=this.high,n=this.low;return[n&255,n>>>8&255,n>>>16&255,n>>>24,t&255,t>>>8&255,t>>>16&255,t>>>24]}toBytesBE(){let t=this.high,n=this.low;return[t>>>24,t>>>16&255,t>>>8&255,t&255,n>>>24,n>>>16&255,n>>>8&255,n&255]}toSigned(){return this.unsigned?e.fromBits(this.low,this.high,!1):this}toString(t){if(t=t||10,t<2||36<t)throw new h("radix");if(this.isZero())return"0";if(this.isNegative())if(this.eq(e.MIN_VALUE)){let i=e.fromNumber(t),f=this.div(i),l=f.mul(i).sub(this);return f.toString(t)+l.toInt().toString(t)}else return"-"+this.neg().toString(t);let n=e.fromNumber(Math.pow(t,6),this.unsigned),r=this,s="";for(;;){let i=r.div(n),l=(r.sub(i.mul(n)).toInt()>>>0).toString(t);if(r=i,r.isZero())return l+s;for(;l.length<6;)l="0"+l;s=""+l+s}}toUnsigned(){return this.unsigned?this:e.fromBits(this.low,this.high,!0)}xor(t){return e.isLong(t)||(t=e.fromValue(t)),e.fromBits(this.low^t.low,this.high^t.high,this.unsigned)}eqz(){return this.isZero()}le(t){return this.lessThanOrEqual(t)}toExtendedJSON(t){return t&&t.relaxed?this.toNumber():{$numberLong:this.toString()}}static fromExtendedJSON(t,n){let{useBigInt64:r=!1,relaxed:s=!0}={...n};if(t.$numberLong.length>Js)throw new h("$numberLong string is too long");if(!Ys.test(t.$numberLong))throw new h(`$numberLong string "${t.$numberLong}" is in an invalid format`);if(r){let f=BigInt(t.$numberLong);return BigInt.asIntN(64,f)}let i=e.fromString(t.$numberLong);return s?i.toNumber():i}inspect(t,n,r){r??=M;let s=r(this.toString(),n),i=this.unsigned?`, ${r(this.unsigned,n)}`:"";return`new Long(${s}${i})`}};p.TWO_PWR_24=p.fromInt(Vs);p.MAX_UNSIGNED_VALUE=p.fromBits(-1,-1,!0);p.ZERO=p.fromInt(0);p.UZERO=p.fromInt(0,!0);p.ONE=p.fromInt(1);p.UONE=p.fromInt(1,!0);p.NEG_ONE=p.fromInt(-1);p.MAX_VALUE=p.fromBits(-1,2147483647,!1);p.MIN_VALUE=p.fromBits(0,-2147483648,!1);Ws=/^(\+|-)?(\d+|(\d*\.\d*))?(E|e)?([-+])?(\d+)?$/,Zs=/^(\+|-)?(Infinity|inf)$/i,Ks=/^(\+|-)?NaN$/i,pt=6111,xt=-6176,un=6176,hn=34,ue=u.fromNumberArray([124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].reverse()),gn=u.fromNumberArray([248,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].reverse()),yn=u.fromNumberArray([120,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].reverse()),Gs=/^([-+])?(\d+)?$/,Xs=31,mn=16383,Qs=30,vs=31;c(dn,"isDigit");c(ti,"divideu128");c(ei,"multiply64x2");c(ni,"lessThan");c(W,"invalidErr");gt=class e extends F{static{c(this,"Decimal128")}get _bsontype(){return"Decimal128"}constructor(t){if(super(),typeof t=="string")this.bytes=e.fromString(t).bytes;else if(t instanceof Uint8Array||St(t)){if(t.byteLength!==16)throw new h("Decimal128 must take a Buffer of 16 bytes");this.bytes=t}else throw new h("Decimal128 must take a Buffer or string")}static fromString(t){return e._fromString(t,{allowRounding:!1})}static fromStringWithRounding(t){return e._fromString(t,{allowRounding:!0})}static _fromString(t,n){let r=!1,s=!1,i=!1,f=!1,l=0,o=0,d=0,g=0,a=0,y=[0],w=0,m=0,I=0,A=0,j=new p(0,0),O=new p(0,0),P=0,B=0;if(t.length>=7e3)throw new h(""+t+" not a valid Decimal128 string");let E=t.match(Ws),$=t.match(Zs),Z=t.match(Ks);if(!E&&!$&&!Z||t.length===0)throw new h(""+t+" not a valid Decimal128 string");if(E){let S=E[2],L=E[4],k=E[5],R=E[6];L&&R===void 0&&W(t,"missing exponent power"),L&&S===void 0&&W(t,"missing exponent base"),L===void 0&&(k||R)&&W(t,"missing e before exponent")}if((t[B]==="+"||t[B]==="-")&&(s=!0,r=t[B++]==="-"),!dn(t[B])&&t[B]!=="."){if(t[B]==="i"||t[B]==="I")return new e(r?gn:yn);if(t[B]==="N")return new e(ue)}for(;dn(t[B])||t[B]===".";){if(t[B]==="."){i&&W(t,"contains multiple periods"),i=!0,B=B+1;continue}w<hn&&(t[B]!=="0"||f)&&(f||(a=o),f=!0,y[m++]=parseInt(t[B],10),w=w+1),f&&(d=d+1),i&&(g=g+1),o=o+1,B=B+1}if(i&&!o)throw new h(""+t+" not a valid Decimal128 string");if(t[B]==="e"||t[B]==="E"){let S=t.substr(++B).match(Gs);if(!S||!S[2])return new e(ue);A=parseInt(S[0],10),B=B+S[0].length}if(t[B])return new e(ue);if(!w)y[0]=0,d=1,w=1,l=0;else if(I=w-1,l=d,l!==1)for(;t[a+l-1+Number(s)+Number(i)]==="0";)l=l-1;for(A<=g&&g>A+16384?A=xt:A=A-g;A>pt;){if(I=I+1,I>=hn){if(l===0){A=pt;break}W(t,"overflow")}A=A-1}if(n.allowRounding){for(;A<xt||w<d;){if(I===0&&l<w){A=xt,l=0;break}if(w<d?d=d-1:I=I-1,A<pt)A=A+1;else{if(y.join("").match(/^0+$/)){A=pt;break}W(t,"overflow")}}if(I+1<l){let S=o;i&&(a=a+1,S=S+1),s&&(a=a+1,S=S+1);let L=parseInt(t[a+I+1],10),k=0;if(L>=5&&(k=1,L===5)){k=y[I]%2===1?1:0;for(let R=a+I+2;R<S;R++)if(parseInt(t[R],10)){k=1;break}}if(k){let R=I;for(;R>=0&&++y[R]>9;R--)if(y[R]=0,R===0)if(A<pt)A=A+1,y[R]=1;else return new e(r?gn:yn)}}}else{for(;A<xt||w<d;){if(I===0){if(l===0){A=xt;break}W(t,"exponent underflow")}w<d?(t[d-1+Number(s)+Number(i)]!=="0"&&l!==0&&W(t,"inexact rounding"),d=d-1):(y[I]!==0&&W(t,"inexact rounding"),I=I-1),A<pt?A=A+1:W(t,"overflow")}I+1<l&&(i&&(a=a+1),s&&(a=a+1),parseInt(t[a+I+1],10)!==0&&W(t,"inexact rounding"))}if(j=p.fromNumber(0),O=p.fromNumber(0),l===0)j=p.fromNumber(0),O=p.fromNumber(0);else if(I<17){let S=0;for(O=p.fromNumber(y[S++]),j=new p(0,0);S<=I;S++)O=O.multiply(p.fromNumber(10)),O=O.add(p.fromNumber(y[S]))}else{let S=0;for(j=p.fromNumber(y[S++]);S<=I-17;S++)j=j.multiply(p.fromNumber(10)),j=j.add(p.fromNumber(y[S]));for(O=p.fromNumber(y[S++]);S<=I;S++)O=O.multiply(p.fromNumber(10)),O=O.add(p.fromNumber(y[S]))}let C=ei(j,p.fromString("100000000000000000"));C.low=C.low.add(O),ni(C.low,O)&&(C.high=C.high.add(p.fromNumber(1))),P=A+un;let N={low:p.fromNumber(0),high:p.fromNumber(0)};C.high.shiftRightUnsigned(49).and(p.fromNumber(1)).equals(p.fromNumber(1))?(N.high=N.high.or(p.fromNumber(3).shiftLeft(61)),N.high=N.high.or(p.fromNumber(P).and(p.fromNumber(16383).shiftLeft(47))),N.high=N.high.or(C.high.and(p.fromNumber(0x7fffffffffff)))):(N.high=N.high.or(p.fromNumber(P&16383).shiftLeft(49)),N.high=N.high.or(C.high.and(p.fromNumber(562949953421311)))),N.low=C.low,r&&(N.high=N.high.or(p.fromString("9223372036854775808")));let b=u.allocateUnsafe(16);return B=0,b[B++]=N.low.low&255,b[B++]=N.low.low>>8&255,b[B++]=N.low.low>>16&255,b[B++]=N.low.low>>24&255,b[B++]=N.low.high&255,b[B++]=N.low.high>>8&255,b[B++]=N.low.high>>16&255,b[B++]=N.low.high>>24&255,b[B++]=N.high.low&255,b[B++]=N.high.low>>8&255,b[B++]=N.high.low>>16&255,b[B++]=N.high.low>>24&255,b[B++]=N.high.high&255,b[B++]=N.high.high>>8&255,b[B++]=N.high.high>>16&255,b[B++]=N.high.high>>24&255,new e(b)}toString(){let t,n=0,r=new Array(36);for(let B=0;B<r.length;B++)r[B]=0;let s=0,i=!1,f,l={parts:[0,0,0,0]},o,d,g=[];s=0;let a=this.bytes,y=a[s++]|a[s++]<<8|a[s++]<<16|a[s++]<<24,w=a[s++]|a[s++]<<8|a[s++]<<16|a[s++]<<24,m=a[s++]|a[s++]<<8|a[s++]<<16|a[s++]<<24,I=a[s++]|a[s++]<<8|a[s++]<<16|a[s++]<<24;s=0,{low:new p(y,w),high:new p(m,I)}.high.lessThan(p.ZERO)&&g.push("-");let j=I>>26&Xs;if(j>>3===3){if(j===Qs)return g.join("")+"Infinity";if(j===vs)return"NaN";t=I>>15&mn,f=8+(I>>14&1)}else f=I>>14&7,t=I>>17&mn;let O=t-un;if(l.parts[0]=(I&16383)+((f&15)<<14),l.parts[1]=m,l.parts[2]=w,l.parts[3]=y,l.parts[0]===0&&l.parts[1]===0&&l.parts[2]===0&&l.parts[3]===0)i=!0;else for(d=3;d>=0;d--){let B=0,E=ti(l);if(l=E.quotient,B=E.rem.low,!!B)for(o=8;o>=0;o--)r[d*9+o]=B%10,B=Math.floor(B/10)}if(i)n=1,r[s]=0;else for(n=36;!r[s];)n=n-1,s=s+1;let P=n-1+O;if(P>=34||P<=-7||O>0){if(n>34)return g.push("0"),O>0?g.push(`E+${O}`):O<0&&g.push(`E${O}`),g.join("");g.push(`${r[s++]}`),n=n-1,n&&g.push(".");for(let B=0;B<n;B++)g.push(`${r[s++]}`);g.push("E"),P>0?g.push(`+${P}`):g.push(`${P}`)}else if(O>=0)for(let B=0;B<n;B++)g.push(`${r[s++]}`);else{let B=n+O;if(B>0)for(let E=0;E<B;E++)g.push(`${r[s++]}`);else g.push("0");for(g.push(".");B++<0;)g.push("0");for(let E=0;E<n-Math.max(B-1,0);E++)g.push(`${r[s++]}`)}return g.join("")}toJSON(){return{$numberDecimal:this.toString()}}toExtendedJSON(){return{$numberDecimal:this.toString()}}static fromExtendedJSON(t){return e.fromString(t.$numberDecimal)}inspect(t,n,r){return r??=M,`new Decimal128(${r(this.toString(),n)})`}},ft=class e extends F{static{c(this,"Double")}get _bsontype(){return"Double"}constructor(t){super(),t instanceof Number&&(t=t.valueOf()),this.value=+t}static fromString(t){let n=Number(t);if(t==="NaN")return new e(NaN);if(t==="Infinity")return new e(1/0);if(t==="-Infinity")return new e(-1/0);if(!Number.isFinite(n))throw new h(`Input: ${t} is not representable as a Double`);if(t.trim()!==t)throw new h(`Input: '${t}' contains whitespace`);if(t==="")throw new h("Input is an empty string");if(/[^-0-9.+eE]/.test(t))throw new h(`Input: '${t}' is not in decimal or exponential notation`);return new e(n)}valueOf(){return this.value}toJSON(){return this.value}toString(t){return this.value.toString(t)}toExtendedJSON(t){return t&&(t.legacy||t.relaxed&&isFinite(this.value))?this.value:Object.is(Math.sign(this.value),-0)?{$numberDouble:"-0.0"}:{$numberDouble:Number.isInteger(this.value)?this.value.toFixed(1):this.value.toString()}}static fromExtendedJSON(t,n){let r=parseFloat(t.$numberDouble);return n&&n.relaxed?r:new e(r)}inspect(t,n,r){return r??=M,`new Double(${r(this.value,n)})`}},ct=class e extends F{static{c(this,"Int32")}get _bsontype(){return"Int32"}constructor(t){super(),t instanceof Number&&(t=t.valueOf()),this.value=+t|0}static fromString(t){let n=Fn(t),r=Number(t);if(Ct<r)throw new h(`Input: '${t}' is larger than the maximum value for Int32`);if(zt>r)throw new h(`Input: '${t}' is smaller than the minimum value for Int32`);if(Number.isSafeInteger(r)){if(r.toString()!==n)throw new h(`Input: '${t}' is not a valid Int32 string`)}else throw new h(`Input: '${t}' is not a safe integer`);return new e(r)}valueOf(){return this.value}toString(t){return this.value.toString(t)}toJSON(){return this.value}toExtendedJSON(t){return t&&(t.relaxed||t.legacy)?this.value:{$numberInt:this.value.toString()}}static fromExtendedJSON(t,n){return n&&n.relaxed?parseInt(t.$numberInt,10):new e(t.$numberInt)}inspect(t,n,r){return r??=M,`new Int32(${r(this.value,n)})`}},yt=class e extends F{static{c(this,"MaxKey")}get _bsontype(){return"MaxKey"}toExtendedJSON(){return{$maxKey:1}}static fromExtendedJSON(){return new e}inspect(){return"new MaxKey()"}},mt=class e extends F{static{c(this,"MinKey")}get _bsontype(){return"MinKey"}toExtendedJSON(){return{$minKey:1}}static fromExtendedJSON(){return new e}inspect(){return"new MinKey()"}},ut=null,Dt=new WeakMap,nt=class e extends F{static{c(this,"ObjectId")}get _bsontype(){return"ObjectId"}constructor(t){super();let n;if(typeof t=="object"&&t&&"id"in t){if(typeof t.id!="string"&&!ArrayBuffer.isView(t.id))throw new h("Argument passed in must have an id that is of type string or Buffer");"toHexString"in t&&typeof t.toHexString=="function"?n=u.fromHex(t.toHexString()):n=t.id}else n=t;if(n==null||typeof n=="number")this.buffer=e.generate(typeof n=="number"?n:void 0);else if(ArrayBuffer.isView(n)&&n.byteLength===12)this.buffer=u.toLocalBufferType(n);else if(typeof n=="string")if(e.validateHexString(n))this.buffer=u.fromHex(n),e.cacheHexString&&Dt.set(this,n);else throw new h("input must be a 24 character hex string, 12 byte Uint8Array, or an integer");else throw new h("Argument passed in does not match the accepted types")}get id(){return this.buffer}set id(t){this.buffer=t,e.cacheHexString&&Dt.set(this,u.toHex(t))}static validateHexString(t){if(t?.length!==24)return!1;for(let n=0;n<24;n++){let r=t.charCodeAt(n);if(!(r>=48&&r<=57||r>=97&&r<=102||r>=65&&r<=70))return!1}return!0}toHexString(){if(e.cacheHexString){let n=Dt.get(this);if(n)return n}let t=u.toHex(this.id);return e.cacheHexString&&Dt.set(this,t),t}static getInc(){return e.index=(e.index+1)%16777215}static generate(t){typeof t!="number"&&(t=Math.floor(Date.now()/1e3));let n=e.getInc(),r=u.allocateUnsafe(12);return T.setInt32BE(r,0,t),ut===null&&(ut=u.randomBytes(5)),r[4]=ut[0],r[5]=ut[1],r[6]=ut[2],r[7]=ut[3],r[8]=ut[4],r[11]=n&255,r[10]=n>>8&255,r[9]=n>>16&255,r}toString(t){return t==="base64"?u.toBase64(this.id):t==="hex"?this.toHexString():this.toHexString()}toJSON(){return this.toHexString()}static is(t){return t!=null&&typeof t=="object"&&"_bsontype"in t&&t._bsontype==="ObjectId"}equals(t){if(t==null)return!1;if(e.is(t))return this.buffer[11]===t.buffer[11]&&u.equals(this.buffer,t.buffer);if(typeof t=="string")return t.toLowerCase()===this.toHexString();if(typeof t=="object"&&typeof t.toHexString=="function"){let n=t.toHexString(),r=this.toHexString();return typeof n=="string"&&n.toLowerCase()===r}return!1}getTimestamp(){let t=new Date,n=T.getUint32BE(this.buffer,0);return t.setTime(Math.floor(n)*1e3),t}static createPk(){return new e}serializeInto(t,n){return t[n]=this.buffer[0],t[n+1]=this.buffer[1],t[n+2]=this.buffer[2],t[n+3]=this.buffer[3],t[n+4]=this.buffer[4],t[n+5]=this.buffer[5],t[n+6]=this.buffer[6],t[n+7]=this.buffer[7],t[n+8]=this.buffer[8],t[n+9]=this.buffer[9],t[n+10]=this.buffer[10],t[n+11]=this.buffer[11],12}static createFromTime(t){let n=u.allocate(12);for(let r=11;r>=4;r--)n[r]=0;return T.setInt32BE(n,0,t),new e(n)}static createFromHexString(t){if(t?.length!==24)throw new h("hex string must be 24 characters");return new e(u.fromHex(t))}static createFromBase64(t){if(t?.length!==16)throw new h("base64 string must be 16 characters");return new e(u.fromBase64(t))}static isValid(t){if(t==null)return!1;if(typeof t=="string")return e.validateHexString(t);try{return new e(t),!0}catch{return!1}}toExtendedJSON(){return this.toHexString?{$oid:this.toHexString()}:{$oid:this.toString("hex")}}static fromExtendedJSON(t){return new e(t.$oid)}isCached(){return e.cacheHexString&&Dt.has(this)}inspect(t,n,r){return r??=M,`new ObjectId(${r(this.toHexString(),n)})`}};nt.index=Math.floor(Math.random()*16777215);c(Yt,"internalCalculateObjectSize");c(wn,"calculateElement");c(ri,"alphabetize");rt=class e extends F{static{c(this,"BSONRegExp")}get _bsontype(){return"BSONRegExp"}constructor(t,n){if(super(),this.pattern=t,this.options=ri(n??""),this.pattern.indexOf("\0")!==-1)throw new h(`BSON Regex patterns cannot contain null bytes, found: ${JSON.stringify(this.pattern)}`);if(this.options.indexOf("\0")!==-1)throw new h(`BSON Regex options cannot contain null bytes, found: ${JSON.stringify(this.options)}`);for(let r=0;r<this.options.length;r++)if(!(this.options[r]==="i"||this.options[r]==="m"||this.options[r]==="x"||this.options[r]==="l"||this.options[r]==="s"||this.options[r]==="u"))throw new h(`The regular expression option [${this.options[r]}] is not supported`)}static parseOptions(t){return t?t.split("").sort().join(""):""}toExtendedJSON(t){return t=t||{},t.legacy?{$regex:this.pattern,$options:this.options}:{$regularExpression:{pattern:this.pattern,options:this.options}}}static fromExtendedJSON(t){if("$regex"in t)if(typeof t.$regex!="string"){if(t.$regex._bsontype==="BSONRegExp")return t}else return new e(t.$regex,e.parseOptions(t.$options));if("$regularExpression"in t)return new e(t.$regularExpression.pattern,e.parseOptions(t.$regularExpression.options));throw new h(`Unexpected BSONRegExp EJSON object form: ${JSON.stringify(t)}`)}inspect(t,n,r){let s=_s(n)??(l=>l);r??=M;let i=s(r(this.pattern),"regexp"),f=s(r(this.options),"regexp");return`new BSONRegExp(${i}, ${f})`}},dt=class e extends F{static{c(this,"BSONSymbol")}get _bsontype(){return"BSONSymbol"}constructor(t){super(),this.value=t}valueOf(){return this.value}toString(){return this.value}toJSON(){return this.value}toExtendedJSON(){return{$symbol:this.value}}static fromExtendedJSON(t){return new e(t.$symbol)}inspect(t,n,r){return r??=M,`new BSONSymbol(${r(this.value,n)})`}},si=p,lt=class e extends si{static{c(this,"Timestamp")}get _bsontype(){return"Timestamp"}get i(){return this.low>>>0}get t(){return this.high>>>0}constructor(t){if(t==null)super(0,0,!0);else if(typeof t=="bigint")super(t,!0);else if(p.isLong(t))super(t.low,t.high,!0);else if(typeof t=="object"&&"t"in t&&"i"in t){if(typeof t.t!="number"&&(typeof t.t!="object"||t.t._bsontype!=="Int32"))throw new h("Timestamp constructed from { t, i } must provide t as a number");if(typeof t.i!="number"&&(typeof t.i!="object"||t.i._bsontype!=="Int32"))throw new h("Timestamp constructed from { t, i } must provide i as a number");let n=Number(t.t),r=Number(t.i);if(n<0||Number.isNaN(n))throw new h("Timestamp constructed from { t, i } must provide a positive t");if(r<0||Number.isNaN(r))throw new h("Timestamp constructed from { t, i } must provide a positive i");if(n>4294967295)throw new h("Timestamp constructed from { t, i } must provide t equal or less than uint32 max");if(r>4294967295)throw new h("Timestamp constructed from { t, i } must provide i equal or less than uint32 max");super(r,n,!0)}else throw new h("A Timestamp can only be constructed with: bigint, Long, or { t: number; i: number }")}toJSON(){return{$timestamp:this.toString()}}static fromInt(t){return new e(p.fromInt(t,!0))}static fromNumber(t){return new e(p.fromNumber(t,!0))}static fromBits(t,n){return new e({i:t,t:n})}static fromString(t,n){return new e(p.fromString(t,!0,n))}toExtendedJSON(){return{$timestamp:{t:this.t,i:this.i}}}static fromExtendedJSON(t){let n=p.isLong(t.$timestamp.i)?t.$timestamp.i.getLowBitsUnsigned():t.$timestamp.i,r=p.isLong(t.$timestamp.t)?t.$timestamp.t.getLowBitsUnsigned():t.$timestamp.t;return new e({t:r,i:n})}inspect(t,n,r){r??=M;let s=r(this.t,n),i=r(this.i,n);return`new Timestamp({ t: ${s}, i: ${i} })`}};lt.MAX_VALUE=p.MAX_UNSIGNED_VALUE;ii=p.fromNumber(Nn),oi=p.fromNumber(On);c(qn,"internalDeserialize");fi=/^\$ref$|^\$id$|^\$db$/;c(Wt,"deserializeObject");Kt=/\x00/,pn=new Set(["$db","$ref","$id","$clusterTime"]);c(he,"serializeString");c(ge,"serializeNumber");c(ye,"serializeBigInt");c(bt,"serializeNull");c(me,"serializeBoolean");c(de,"serializeDate");c(we,"serializeRegExp");c(pe,"serializeBSONRegExp");c(be,"serializeMinMax");c(Se,"serializeObjectId");c(Be,"serializeBuffer");c(Ne,"serializeObject");c(Oe,"serializeDecimal128");c(Ee,"serializeLong");c(Ie,"serializeInt32");c(Te,"serializeDouble");c($e,"serializeFunction");c(Ae,"serializeCode");c(_e,"serializeBinary");c(Le,"serializeSymbol");c(Ue,"serializeDBRef");c(Pt,"serializeInto");c(ci,"isBSONType");li={$oid:nt,$binary:_,$uuid:_,$symbol:dt,$numberInt:ct,$numberDecimal:gt,$numberDouble:ft,$numberLong:p,$minKey:mt,$maxKey:yt,$regex:rt,$regularExpression:rt,$timestamp:lt};c(kn,"deserializeValue");c(ai,"serializeArray");c(bn,"getISOString");c(v,"serializeValue");ui={Binary:c(e=>new _(e.value(),e.sub_type),"Binary"),Code:c(e=>new et(e.code,e.scope),"Code"),DBRef:c(e=>new K(e.collection||e.namespace,e.oid,e.db,e.fields),"DBRef"),Decimal128:c(e=>new gt(e.bytes),"Decimal128"),Double:c(e=>new ft(e.value),"Double"),Int32:c(e=>new ct(e.value),"Int32"),Long:c(e=>p.fromBits(e.low!=null?e.low:e.low_,e.low!=null?e.high:e.high_,e.low!=null?e.unsigned:e.unsigned_),"Long"),MaxKey:c(()=>new yt,"MaxKey"),MinKey:c(()=>new mt,"MinKey"),ObjectId:c(e=>new nt(e),"ObjectId"),BSONRegExp:c(e=>new rt(e.pattern,e.options),"BSONRegExp"),BSONSymbol:c(e=>new dt(e.value),"BSONSymbol"),Timestamp:c(e=>lt.fromBits(e.low,e.high),"Timestamp")};c(hi,"serializeDocument");c(Vn,"parse");c(Hn,"stringify");c(gi,"EJSONserialize");c(yi,"EJSONdeserialize");wt=Object.create(null);wt.parse=Vn;wt.stringify=Hn;wt.serialize=gi;wt.deserialize=yi;Object.freeze(wt);D={double:1,string:2,object:3,array:4,binData:5,undefined:6,objectId:7,bool:8,date:9,null:10,regex:11,dbPointer:12,javascript:13,symbol:14,javascriptWithScope:15,int:16,timestamp:17,long:18,decimal:19,minKey:255,maxKey:127};c(xe,"getSize");c(De,"findNull");c(mi,"parseToElements");$t=Object.create(null);$t.parseToElements=mi;$t.ByteUtils=u;$t.NumberUtils=T;Object.freeze($t);Jn=1024*1024*17,it=u.allocate(Jn);c(Yn,"setInternalBufferSize");c(Wn,"serialize");c(Zn,"serializeWithBufferAndIndex");c(Kn,"deserialize");c(Gn,"calculateObjectSize");c(Xn,"deserializeStream");di=Object.freeze({__proto__:null,BSONError:h,BSONOffsetError:H,BSONRegExp:rt,BSONRuntimeError:Tt,BSONSymbol:dt,BSONType:jn,BSONValue:F,BSONVersionError:tt,Binary:_,Code:et,DBRef:K,Decimal128:gt,Double:ft,EJSON:wt,Int32:ct,Long:p,MaxKey:yt,MinKey:mt,ObjectId:nt,Timestamp:lt,UUID:ot,calculateObjectSize:Gn,deserialize:Kn,deserializeStream:Xn,onDemand:$t,serialize:Wn,serializeWithBufferAndIndex:Zn,setInternalBufferSize:Yn})});var Xt=x((Uf,tr)=>{var q=new Map,qt=new Set(["/"]),vn=[],Gt=c(e=>vn.forEach(t=>t(e)),"emit"),kt=c((e,t)=>Object.assign(new Error(`${e}: ${t}`),{code:e}),"fail"),Qn=c(e=>e.slice(0,e.lastIndexOf("/"))||"/","dirname");tr.exports={readFileSync(e){if(qt.has(e))throw kt("EISDIR",e);if(!q.has(e))throw kt("ENOENT",e);let t=q.get(e);return Gt({type:"read",path:e,bytes:t}),new Uint8Array(t)},writeFileSync(e,t){let n=new Uint8Array(t);q.set(e,n),Gt({type:"write",path:e,bytes:n})},renameSync(e,t){if(!q.has(e))throw kt("ENOENT",e);q.set(t,q.get(e)),q.delete(e),Gt({type:"rename",from:e,to:t,bytes:q.get(t)})},unlinkSync(e){if(!q.has(e))throw kt("ENOENT",e);q.delete(e),Gt({type:"unlink",path:e})},mkdirSync(e){let t=e;for(;t&&!qt.has(t);)qt.add(t),t=Qn(t)},readdirSync(e){if(!qt.has(e))throw kt("ENOENT",e);return[...q.keys()].filter(t=>Qn(t)===e).map(t=>t.slice(e.length+1))},existsSync:c(e=>q.has(e)||qt.has(e),"existsSync"),__files:q,__on:c(e=>vn.push(e),"__on")}});var Ve=x((Df,nr)=>{"use strict";function G(e){if(typeof e!="string")throw new TypeError("Path must be a string. Received "+JSON.stringify(e))}c(G,"assertPath");function er(e,t){for(var n="",r=0,s=-1,i=0,f,l=0;l<=e.length;++l){if(l<e.length)f=e.charCodeAt(l);else{if(f===47)break;f=47}if(f===47){if(!(s===l-1||i===1))if(s!==l-1&&i===2){if(n.length<2||r!==2||n.charCodeAt(n.length-1)!==46||n.charCodeAt(n.length-2)!==46){if(n.length>2){var o=n.lastIndexOf("/");if(o!==n.length-1){o===-1?(n="",r=0):(n=n.slice(0,o),r=n.length-1-n.lastIndexOf("/")),s=l,i=0;continue}}else if(n.length===2||n.length===1){n="",r=0,s=l,i=0;continue}}t&&(n.length>0?n+="/..":n="..",r=2)}else n.length>0?n+="/"+e.slice(s+1,l):n=e.slice(s+1,l),r=l-s-1;s=l,i=0}else f===46&&i!==-1?++i:i=-1}return n}c(er,"normalizeStringPosix");function wi(e,t){var n=t.dir||t.root,r=t.base||(t.name||"")+(t.ext||"");return n?n===t.root?n+r:n+e+r:r}c(wi,"_format");var At={resolve:c(function(){for(var t="",n=!1,r,s=arguments.length-1;s>=-1&&!n;s--){var i;s>=0?i=arguments[s]:(r===void 0&&(r=process.cwd()),i=r),G(i),i.length!==0&&(t=i+"/"+t,n=i.charCodeAt(0)===47)}return t=er(t,!n),n?t.length>0?"/"+t:"/":t.length>0?t:"."},"resolve"),normalize:c(function(t){if(G(t),t.length===0)return".";var n=t.charCodeAt(0)===47,r=t.charCodeAt(t.length-1)===47;return t=er(t,!n),t.length===0&&!n&&(t="."),t.length>0&&r&&(t+="/"),n?"/"+t:t},"normalize"),isAbsolute:c(function(t){return G(t),t.length>0&&t.charCodeAt(0)===47},"isAbsolute"),join:c(function(){if(arguments.length===0)return".";for(var t,n=0;n<arguments.length;++n){var r=arguments[n];G(r),r.length>0&&(t===void 0?t=r:t+="/"+r)}return t===void 0?".":At.normalize(t)},"join"),relative:c(function(t,n){if(G(t),G(n),t===n||(t=At.resolve(t),n=At.resolve(n),t===n))return"";for(var r=1;r<t.length&&t.charCodeAt(r)===47;++r);for(var s=t.length,i=s-r,f=1;f<n.length&&n.charCodeAt(f)===47;++f);for(var l=n.length,o=l-f,d=i<o?i:o,g=-1,a=0;a<=d;++a){if(a===d){if(o>d){if(n.charCodeAt(f+a)===47)return n.slice(f+a+1);if(a===0)return n.slice(f+a)}else i>d&&(t.charCodeAt(r+a)===47?g=a:a===0&&(g=0));break}var y=t.charCodeAt(r+a),w=n.charCodeAt(f+a);if(y!==w)break;y===47&&(g=a)}var m="";for(a=r+g+1;a<=s;++a)(a===s||t.charCodeAt(a)===47)&&(m.length===0?m+="..":m+="/..");return m.length>0?m+n.slice(f+g):(f+=g,n.charCodeAt(f)===47&&++f,n.slice(f))},"relative"),_makeLong:c(function(t){return t},"_makeLong"),dirname:c(function(t){if(G(t),t.length===0)return".";for(var n=t.charCodeAt(0),r=n===47,s=-1,i=!0,f=t.length-1;f>=1;--f)if(n=t.charCodeAt(f),n===47){if(!i){s=f;break}}else i=!1;return s===-1?r?"/":".":r&&s===1?"//":t.slice(0,s)},"dirname"),basename:c(function(t,n){if(n!==void 0&&typeof n!="string")throw new TypeError('"ext" argument must be a string');G(t);var r=0,s=-1,i=!0,f;if(n!==void 0&&n.length>0&&n.length<=t.length){if(n.length===t.length&&n===t)return"";var l=n.length-1,o=-1;for(f=t.length-1;f>=0;--f){var d=t.charCodeAt(f);if(d===47){if(!i){r=f+1;break}}else o===-1&&(i=!1,o=f+1),l>=0&&(d===n.charCodeAt(l)?--l===-1&&(s=f):(l=-1,s=o))}return r===s?s=o:s===-1&&(s=t.length),t.slice(r,s)}else{for(f=t.length-1;f>=0;--f)if(t.charCodeAt(f)===47){if(!i){r=f+1;break}}else s===-1&&(i=!1,s=f+1);return s===-1?"":t.slice(r,s)}},"basename"),extname:c(function(t){G(t);for(var n=-1,r=0,s=-1,i=!0,f=0,l=t.length-1;l>=0;--l){var o=t.charCodeAt(l);if(o===47){if(!i){r=l+1;break}continue}s===-1&&(i=!1,s=l+1),o===46?n===-1?n=l:f!==1&&(f=1):n!==-1&&(f=-1)}return n===-1||s===-1||f===0||f===1&&n===s-1&&n===r+1?"":t.slice(n,s)},"extname"),format:c(function(t){if(t===null||typeof t!="object")throw new TypeError('The "pathObject" argument must be of type Object. Received type '+typeof t);return wi("/",t)},"format"),parse:c(function(t){G(t);var n={root:"",dir:"",base:"",ext:"",name:""};if(t.length===0)return n;var r=t.charCodeAt(0),s=r===47,i;s?(n.root="/",i=1):i=0;for(var f=-1,l=0,o=-1,d=!0,g=t.length-1,a=0;g>=i;--g){if(r=t.charCodeAt(g),r===47){if(!d){l=g+1;break}continue}o===-1&&(d=!1,o=g+1),r===46?f===-1?f=g:a!==1&&(a=1):f!==-1&&(a=-1)}return f===-1||o===-1||a===0||a===1&&f===o-1&&f===l+1?o!==-1&&(l===0&&s?n.base=n.name=t.slice(1,o):n.base=n.name=t.slice(l,o)):(l===0&&s?(n.name=t.slice(1,f),n.base=t.slice(1,o)):(n.name=t.slice(l,f),n.base=t.slice(l,o)),n.ext=t.slice(f,o)),l>0?n.dir=t.slice(0,l-1):s&&(n.dir="/"),n},"parse"),sep:"/",delimiter:":",win32:null,posix:null};At.posix=At;nr.exports=At});var J=x((jf,rr)=>{"use strict";var at=class extends Error{static{c(this,"YoussefDBError")}constructor(t){super(t),this.name=this.constructor.name}},He=class extends at{static{c(this,"ValidationError")}},Je=class extends at{static{c(this,"UnsupportedOperationError")}},Ye=class extends at{static{c(this,"DuplicateKeyError")}constructor(t,n){super(t),this.id=n}},We=class extends at{static{c(this,"CorruptFileError")}constructor(t,n){super(t),this.filePath=n}},Ze=class extends at{static{c(this,"IndexNotFoundError")}};rr.exports={YoussefDBError:at,ValidationError:He,UnsupportedOperationError:Je,DuplicateKeyError:Ye,CorruptFileError:We,IndexNotFoundError:Ze}});var st=x((zf,ir)=>{"use strict";var pi=c((e,t)=>Object.prototype.hasOwnProperty.call(e,t),"hasOwn");function bi(e){if(e===null||typeof e!="object"||e._bsontype!==void 0)return!1;let t=Object.getPrototypeOf(e);return t===Object.prototype||t===null}c(bi,"isPlainObject");var sr=c(e=>e!==null&&typeof e=="object"&&typeof e._bsontype=="string","isBsonValue"),Si=c(e=>sr(e)&&e._bsontype==="ObjectId","isObjectId"),Bi=c(e=>e instanceof Date,"isDate"),Ni=c(e=>e instanceof Uint8Array,"isBinary"),Oi=/^[0-9a-fA-F]{24}$/,Ei=c(e=>typeof e=="string"&&Oi.test(e),"isObjectIdString");ir.exports={hasOwn:pi,isPlainObject:bi,isBsonValue:sr,isObjectId:Si,isDate:Bi,isBinary:Ni,isObjectIdString:Ei}});var cr=x((Ff,fr)=>{function or(e){let t=e.length*8,n=e.length+1,r=Math.ceil((n+8)/64)*64,s=new Uint8Array(r);s.set(e),s[e.length]=128;let i=new DataView(s.buffer);i.setUint32(r-4,t>>>0),i.setUint32(r-8,Math.floor(t/2**32));let f=1732584193,l=4023233417,o=2562383102,d=271733878,g=3285377520,a=new Uint32Array(80);for(let y=0;y<r;y+=64){for(let O=0;O<16;O++)a[O]=i.getUint32(y+O*4);for(let O=16;O<80;O++){let P=a[O-3]^a[O-8]^a[O-14]^a[O-16];a[O]=P<<1|P>>>31}let w=f,m=l,I=o,A=d,j=g;for(let O=0;O<80;O++){let P=O<20?m&I|~m&A:O<40?m^I^A:O<60?m&I|m&A|I&A:m^I^A,B=O<20?1518500249:O<40?1859775393:O<60?2400959708:3395469782,E=(w<<5|w>>>27)+P+j+B+a[O]>>>0;j=A,A=I,I=m<<30|m>>>2,m=w,w=E}f=f+w>>>0,l=l+m>>>0,o=o+I>>>0,d=d+A>>>0,g=g+j>>>0}return[f,l,o,d,g].map(y=>(y>>>0).toString(16).padStart(8,"0")).join("")}c(or,"sha1");var Ii=c(e=>[...e].map(t=>t.toString(16).padStart(2,"0")).join(""),"hex");fr.exports={createHash(){let e=new Uint8Array,t={update(n){let r=new Uint8Array(e.length+n.length);return r.set(e),r.set(n,e.length),e=r,t},digest(){return or(e)}};return t},randomBytes(e){let t=crypto.getRandomValues(new Uint8Array(e));return{toString:c(()=>Ii(t),"toString")}},__sha1:or}});var mr=x((qf,yr)=>{"use strict";var _t=Xt(),hr=cr(),Qt=(Mt(),Jt(Ft)),{CorruptFileError:lr}=J(),ar={ignoreUndefined:!0,checkKeys:!1},Ti={promoteBuffers:!0},ur=17*1024*1024;function $i(e){let t=Qt.calculateObjectSize(e,ar);return t>ur&&(ur=t,Qt.setInternalBufferSize(t)),Qt.serialize(e,ar)}c($i,"serialize");var gr=c(e=>hr.createHash("sha1").update(e).digest("hex"),"hashBytes");function Ai(e){let t;try{t=_t.readFileSync(e)}catch(n){if(n.code==="ENOENT")return null;throw n}if(t.length===0)throw new lr(`${e} is empty, so it is not a valid BSON file.`,e);try{return{value:Qt.deserialize(t,Ti),hash:gr(t),size:t.length}}catch(n){throw new lr(`${e} could not be read as BSON: ${n.message}`,e)}}c(Ai,"readBsonFile");function _i(e,t,n){let r=$i(t);_t.mkdirSync(n,{recursive:!0});let s=`${e}.${process.pid}.${hr.randomBytes(4).toString("hex")}.tmp`;try{_t.writeFileSync(s,r),_t.renameSync(s,e)}catch(i){try{_t.unlinkSync(s)}catch{}throw i}return{hash:gr(r),size:r.length}}c(_i,"writeBsonFile");function Li(e){try{return _t.unlinkSync(e),!0}catch(t){if(t.code==="ENOENT")return!1;throw t}}c(Li,"removeFile");yr.exports={readBsonFile:Ai,writeBsonFile:_i,removeFile:Li}});var Br=x((Vf,Sr)=>{"use strict";var dr=Ve(),{CorruptFileError:wr}=J(),{isPlainObject:vt}=st(),{readBsonFile:pr,writeBsonFile:br,removeFile:Ke}=mr(),Ui=c(e=>Number.isInteger(e)&&e>=0,"isPosition");function xi(e){return vt(e)&&e.version===1&&(e.sourceHash===null||typeof e.sourceHash=="string")&&Array.isArray(e.fields)&&e.fields.every(t=>typeof t=="string"&&t.length>0)&&Array.isArray(e.entries)&&e.entries.length===e.fields.length&&e.entries.every((t,n)=>vt(t)&&t.field===e.fields[n]&&Array.isArray(t.keys)&&t.keys.every(r=>Array.isArray(r)&&r.length===2&&typeof r[0]=="string"&&Array.isArray(r[1])&&r[1].every(Ui)))}c(xi,"isValidIndexState");var Ge=class{static{c(this,"CollectionStore")}constructor(t,n){this.dir=t,this.dataPath=dr.join(t,`${n}.bson`),this.indexPath=dr.join(t,`${n}.index.bson`)}readDocs(){let t=pr(this.dataPath);if(t===null)return{docs:[],hash:null};let{value:n,hash:r}=t;if(!vt(n)||!Array.isArray(n.data)||!n.data.every(vt))throw new wr(`${this.dataPath} is valid BSON but not a youssefdb collection (expected { data: [documents] }).`,this.dataPath);return{docs:n.data,hash:r}}writeDocs(t){return br(this.dataPath,{data:t},this.dir).hash}readIndex(){try{let t=pr(this.indexPath);if(t===null)return null;let n=t.value;return xi(n)?n:null}catch(t){if(t instanceof wr)return null;throw t}}writeIndex(t){br(this.indexPath,t,this.dir)}removeIndex(){return Ke(this.indexPath)}removeAll(){let t=Ke(this.dataPath),n=Ke(this.indexPath);return t||n}};Sr.exports={CollectionStore:Ge}});var Tr=x((Jf,Ir)=>{"use strict";var{isObjectId:Nr,isDate:Or,isObjectIdString:Di}=st();function Er(e){if(e==null)return"null";switch(typeof e){case"string":return`s${JSON.stringify(e)}`;case"number":return`n${Number.isNaN(e)?"NaN":String(e===0?0:e)}`;case"boolean":return`b${e}`;default:return Nr(e)?`o${e.toHexString()}`:Or(e)?`d${e.getTime()}`:void 0}}c(Er,"keyForStoredValue");function Ri(e,t){let n=Object.prototype.hasOwnProperty.call(e,t)?e[t]:void 0,r=new Set,s=c(i=>{let f=Er(i);f!==void 0&&r.add(f)},"add");return Array.isArray(n)?n.forEach(s):s(n),r}c(Ri,"keysForDocument");function ji(e){if(!(Array.isArray(e)||Nr(e)||Di(e))&&!(e!=null&&typeof e=="object"&&!Or(e)))return Er(e)}c(ji,"keyForQueryValue");Ir.exports={keysForDocument:Ri,keyForQueryValue:ji}});var Vt=x((Wf,$r)=>{"use strict";var{keysForDocument:Ci,keyForQueryValue:zi}=Tr();function Pi(e,t,n){let r=t.map(s=>{let i=new Map;return e.forEach((f,l)=>{for(let o of Ci(f,s))i.has(o)||i.set(o,[]),i.get(o).push(l)}),{field:s,keys:[...i.entries()]}});return{version:1,sourceHash:n,fields:[...t],entries:r}}c(Pi,"buildIndexState");function Fi(e,t){if(!e)return null;for(let n of Object.keys(t)){if(!e.fields.includes(n))continue;let r=zi(t[n]);if(r===void 0)continue;let s=e.entries.find(f=>f.field===n);if(!s)continue;let i=s.keys.find(([f])=>f===r);return i?i[1]:[]}return null}c(Fi,"findCandidates");$r.exports={buildIndexState:Pi,findCandidates:Fi}});var Y=x((Kf,Lr)=>{"use strict";var{ValidationError:z,UnsupportedOperationError:Ar}=J(),{isPlainObject:_r,isBsonValue:Mi,isDate:qi,isBinary:ki}=st(),Vi=/^[A-Za-z0-9_-]{1,64}$/,Hi=new Set(["Long","Int32","Double"]);function Xe(e){return e===null?"null":Array.isArray(e)?"an array":e instanceof Date?"a Date":typeof e=="object"?`a ${e.constructor?e.constructor.name:"object"}`:`a ${typeof e}`}c(Xe,"describe");function Ji(e){if(typeof e!="string"||!Vi.test(e))throw new z(`Invalid collection name ${JSON.stringify(e)}: use 1-64 letters, digits, "_" or "-".`)}c(Ji,"assertCollectionName");function ee(e,t){if(!_r(e))throw new z(`${t} must be a plain object, got ${Xe(e)}.`)}c(ee,"assertPlainObject");function Yi(e,t="Query"){return e==null?{}:(ee(e,t),e)}c(Yi,"normalizeQuery");function Wi(e,t){if(e==null)throw new z(`${t} needs a filter. Pass {} to match every document.`);return ee(e,"Filter"),e}c(Wi,"requireQuery");function Zi(e,t){if(typeof e!="string"||e.length===0)throw new z(`${t}: field names must be non-empty strings.`);if(e==="__proto__")throw new z(`${t}: "__proto__" cannot be used as a field name.`);if(e.startsWith("$"))throw new Ar(`${t}: "${e}" is an operator, and operators are not supported. youssefdb matches exact values on top-level fields.`);if(e.includes("."))throw new Ar(`${t}: dotted paths like "${e}" are not supported. Match the whole embedded document instead.`)}c(Zi,"assertFieldName");function te(e,t,n=new WeakSet){let r=typeof e;if(!(e===null||r==="string"||r==="number"||r==="boolean")){if(r==="bigint")throw new z(`${t} is a BigInt. BSON reads 64-bit integers back as Numbers, so store a Number instead.`);if(r==="undefined")throw new z(`${t} is undefined. Remove the field or use null.`);if(r==="function"||r==="symbol")throw new z(`${t} is ${Xe(e)}, which cannot be stored.`);if(qi(e)){if(Number.isNaN(e.getTime()))throw new z(`${t} is an invalid Date.`);return}if(e instanceof RegExp)throw new z(`${t} is a RegExp. Store the pattern as a string instead.`);if(Mi(e)){if(Hi.has(e._bsontype))throw new z(`${t} is a BSON ${e._bsontype}. It is read back as a plain Number, so store a Number instead.`);return}if(!ki(e)){if(n.has(e))throw new z(`${t} contains a circular reference.`);if(n.add(e),Array.isArray(e))e.forEach((s,i)=>te(s,`${t}[${i}]`,n));else if(_r(e))for(let s of Object.keys(e)){if(s.includes("\0"))throw new z(`${t} has a field name containing a null character.`);if(s==="__proto__")throw new z(`${t} has a field named "__proto__", which cannot be stored.`);e[s]!==void 0&&te(e[s],`${t}.${s}`,n)}else throw new z(`${t} is ${Xe(e)}. Only plain objects, arrays, strings, numbers, booleans, null, Dates, Buffers and BSON values can be stored.`);n.delete(e)}}}c(te,"assertStorable");function Ki(e,t="Document"){ee(e,t);for(let n of Object.keys(e)){if(n.startsWith("$"))throw new z(`${t}: field names cannot start with "$" ("${n}").`);if(n.includes("."))throw new z(`${t}: field names cannot contain "." ("${n}").`)}if(e._id===null||Array.isArray(e._id))throw new z(`${t}: _id cannot be null or an array.`);te(e,t)}c(Ki,"assertDocument");Lr.exports={assertCollectionName:Ji,assertPlainObject:ee,normalizeQuery:Yi,requireQuery:Wi,assertFieldName:Zi,assertStorable:te,assertDocument:Ki}});var oe=x((Xf,xr)=>{"use strict";var{hasOwn:Gi,isPlainObject:Ur,isBsonValue:ne,isObjectId:re,isDate:se,isBinary:ie}=st();function Qe(e,t){if(e===t)return!0;if(re(e)||re(t)){let n=re(e)?e.toHexString():typeof e=="string"?e.toLowerCase():null,r=re(t)?t.toHexString():typeof t=="string"?t.toLowerCase():null;return n!==null&&n===r}if(typeof e=="number"&&typeof t=="number")return Number.isNaN(e)&&Number.isNaN(t);if(e===null||t===null||typeof e!="object"||typeof t!="object")return!1;if(se(e)||se(t))return se(e)&&se(t)&&Object.is(e.getTime(),t.getTime());if(ie(e)||ie(t)){if(!ie(e)||!ie(t)||e.length!==t.length)return!1;for(let n=0;n<e.length;n++)if(e[n]!==t[n])return!1;return!0}if(ne(e)||ne(t))return!ne(e)||!ne(t)||e._bsontype!==t._bsontype?!1:typeof e.equals=="function"?e.equals(t):String(e)===String(t);if(Array.isArray(e)||Array.isArray(t))return!Array.isArray(e)||!Array.isArray(t)||e.length!==t.length?!1:e.every((n,r)=>Qe(n,t[r]));if(Ur(e)&&Ur(t)){let n=Object.keys(e).filter(s=>e[s]!==void 0),r=Object.keys(t).filter(s=>t[s]!==void 0);return n.length!==r.length?!1:n.every(s=>Gi(t,s)&&Qe(e[s],t[s]))}return!1}c(Qe,"valuesEqual");xr.exports={valuesEqual:Qe}});var ve=x((vf,Dr)=>{"use strict";var{ObjectId:Xi}=(Mt(),Jt(Ft)),{DuplicateKeyError:Qi}=J(),{valuesEqual:vi}=oe();function to(e){let{_id:t,...n}=e;return{_id:t===void 0?new Xi:t,...n}}c(to,"withId");function eo(e,t){let n=[...e];for(let r of t){if(n.some(s=>vi(s._id,r._id)))throw new Qi(`A document with _id ${String(r._id)} already exists.`,r._id);n.push(r)}}c(eo,"assertUniqueIds");Dr.exports={withId:to,assertUniqueIds:eo}});var jr=x((ec,Rr)=>{"use strict";var{assertDocument:no}=Y(),{withId:ro,assertUniqueIds:so}=ve();function io(e,t){no(t);let{docs:n}=e._load(),r=ro(t);return so(n,[r]),n.push(r),e._commit(n),{acknowledged:!0,insertedId:r._id}}c(io,"insertOne");Rr.exports=io});var zr=x((rc,Cr)=>{"use strict";var{ValidationError:oo}=J(),{assertDocument:fo}=Y(),{withId:co,assertUniqueIds:lo}=ve();function ao(e,t){if(!Array.isArray(t))throw new oo("insertMany expects an array of documents.");if(t.forEach((i,f)=>fo(i,`Document at index ${f}`)),t.length===0)return{acknowledged:!0,insertedCount:0,insertedIds:{}};let{docs:n}=e._load(),r=t.map(co);lo(n,r),e._commit(n.concat(r));let s={};return r.forEach((i,f)=>{s[f]=i._id}),{acknowledged:!0,insertedCount:r.length,insertedIds:s}}c(ao,"insertMany");Cr.exports=ao});var Lt=x((ic,Mr)=>{"use strict";var{UnsupportedOperationError:Pr}=J(),{normalizeQuery:uo,assertFieldName:ho,assertStorable:go}=Y(),{hasOwn:yo,isPlainObject:mo}=st(),{valuesEqual:Fr}=oe();function wo(e,t){let n=uo(e,t),r=Object.keys(n).map(s=>{ho(s,"Query");let i=n[s];if(mo(i)){let f=Object.keys(i).find(l=>l.startsWith("$"));if(f)throw new Pr(`Query: the "${f}" operator on "${s}" is not supported. youssefdb matches exact values only.`)}if(i instanceof RegExp)throw new Pr(`Query: regular expressions (on "${s}") are not supported. youssefdb matches exact values only.`);return i!==void 0&&go(i,`Query.${s}`),{field:s,expected:i===void 0?null:i}});return c(function(i){return r.every(({field:f,expected:l})=>{let o=yo(i,f)&&i[f]!==void 0,d=o?i[f]:null;return l===null?d===null:o?Fr(d,l)?!0:Array.isArray(d)&&!Array.isArray(l)&&d.some(g=>Fr(g,l)):!1})},"matches")}c(wo,"compileQuery");Mr.exports={compileQuery:wo}});var fe=x((fc,qr)=>{"use strict";var{compileQuery:po}=Lt(),{normalizeQuery:bo}=Y(),{findCandidates:So}=Vt();function Bo(e,t){let n=po(t),r=bo(t),{docs:s,hash:i}=e._load(),f=So(e._loadIndex(s,i),r);return(f===null?s:f.map(o=>s[o]).filter(Boolean)).filter(n)}c(Bo,"find");qr.exports=Bo});var Vr=x((lc,kr)=>{"use strict";var No=fe();function Oo(e,t){let n=No(e,t);return n.length>0?n[0]:null}c(Oo,"findOne");kr.exports=Oo});var Jr=x((uc,Hr)=>{"use strict";var Eo=fe();function Io(e,t){return Eo(e,t).length}c(Io,"countDocuments");Hr.exports=Io});var tn=x((gc,Zr)=>{"use strict";var{ValidationError:ce,UnsupportedOperationError:To}=J(),{assertPlainObject:Yr,assertFieldName:$o,assertStorable:Ao}=Y(),{hasOwn:_o}=st(),{valuesEqual:Wr}=oe();function Lo(e){Yr(e,"Update");let t=Object.keys(e);if(t.length===0)throw new ce("Update is empty. Use { $set: { field: value } }.");for(let s of t){if(!s.startsWith("$"))throw new ce(`Update must use an operator such as $set (found "${s}"). Replacing whole documents is not supported.`);if(s!=="$set")throw new To(`Update operator "${s}" is not supported. Only $set is available.`)}let n=e.$set;Yr(n,"$set");let r=Object.keys(n).map(s=>{if($o(s,"$set"),n[s]===void 0)throw new ce(`$set.${s} is undefined. Use null to clear a field.`);return Ao(n[s],`$set.${s}`),[s,n[s]]});return c(function(i){let f=!1;for(let[l,o]of r){if(l==="_id"){if(!Wr(i._id,o))throw new ce("_id cannot be changed with $set.");continue}(!_o(i,l)||!Wr(i[l],o))&&(i[l]=o,f=!0)}return f},"apply")}c(Lo,"compileUpdate");Zr.exports={compileUpdate:Lo}});var Gr=x((mc,Kr)=>{"use strict";var{compileQuery:Uo}=Lt(),{compileUpdate:xo}=tn(),{requireQuery:Do}=Y();function Ro(e,t,n){let r=Uo(Do(t,"updateOne"),"Filter"),s=xo(n),{docs:i}=e._load(),f=i.find(r);if(!f)return{acknowledged:!0,matchedCount:0,modifiedCount:0};let l=s(f);return l&&e._commit(i),{acknowledged:!0,matchedCount:1,modifiedCount:l?1:0}}c(Ro,"updateOne");Kr.exports=Ro});var Qr=x((wc,Xr)=>{"use strict";var{compileQuery:jo}=Lt(),{compileUpdate:Co}=tn(),{requireQuery:zo}=Y();function Po(e,t,n){let r=jo(zo(t,"updateMany"),"Filter"),s=Co(n),{docs:i}=e._load(),f=0,l=0;for(let o of i)r(o)&&(f++,s(o)&&l++);return l>0&&e._commit(i),{acknowledged:!0,matchedCount:f,modifiedCount:l}}c(Po,"updateMany");Xr.exports=Po});var ts=x((bc,vr)=>{"use strict";var{compileQuery:Fo}=Lt(),{requireQuery:Mo}=Y();function qo(e,t){let n=Fo(Mo(t,"deleteOne"),"Filter"),{docs:r}=e._load(),s=r.findIndex(n);return s===-1?{acknowledged:!0,deletedCount:0}:(r.splice(s,1),e._commit(r),{acknowledged:!0,deletedCount:1})}c(qo,"deleteOne");vr.exports=qo});var ns=x((Bc,es)=>{"use strict";var{compileQuery:ko}=Lt(),{requireQuery:Vo}=Y();function Ho(e,t){let n=ko(Vo(t,"deleteMany"),"Filter"),{docs:r}=e._load(),s=r.filter(f=>!n(f)),i=r.length-s.length;return i>0&&e._commit(s),{acknowledged:!0,deletedCount:i}}c(Ho,"deleteMany");es.exports=Ho});var is=x((Oc,ss)=>{"use strict";var{ValidationError:rs}=J(),{assertFieldName:Jo}=Y(),{isPlainObject:Yo}=st(),{buildIndexState:Wo}=Vt();function Zo(e){if(typeof e=="string")return e;if(Yo(e)){let t=Object.keys(e);if(t.length!==1)throw new rs('createIndex takes exactly one field, for example createIndex("age") or createIndex({ age: 1 }).');return t[0]}throw new rs("createIndex expects a field name or an object such as { age: 1 }.")}c(Zo,"fieldFromSpec");function Ko(e,t){let n=Zo(t);Jo(n,"createIndex");let{docs:r,hash:s}=e._load(),i=e._store.readIndex(),f=i?[...i.fields]:[];return f.includes(n)||f.push(n),e._store.writeIndex(Wo(r,f,s)),`${n}_1`}c(Ko,"createIndex");ss.exports=Ko});var fs=x((Ic,os)=>{"use strict";var{ValidationError:Go,IndexNotFoundError:Xo}=J(),{buildIndexState:Qo}=Vt();function vo(e,t){if(typeof t!="string"||t.length===0)throw new Go('dropIndex expects an index name such as "age_1" or a field name such as "age".');let n=e._store.readIndex(),r=n?n.fields:[],s=null;if(r.includes(t)?s=t:t.endsWith("_1")&&r.includes(t.slice(0,-2))&&(s=t.slice(0,-2)),s===null)throw new Xo(`Index "${t}" does not exist on "${e.name}".`);let i=r.filter(f=>f!==s);if(i.length===0)e._store.removeIndex();else{let{docs:f,hash:l}=e._load();e._store.writeIndex(Qo(f,i,l))}return!0}c(vo,"dropIndex");os.exports=vo});var ls=x(($c,cs)=>{"use strict";function tf(e){let t=e._store.readIndex();return(t?t.fields:[]).map(n=>({name:`${n}_1`,field:n}))}c(tf,"listIndexes");cs.exports=tf});var us=x((_c,as)=>{"use strict";function ef(e){return e._store.removeAll()}c(ef,"drop");as.exports=ef});var nn=x((Uc,gs)=>{"use strict";var{CollectionStore:nf}=Br(),{buildIndexState:hs}=Vt(),rf=jr(),sf=zr(),of=fe(),ff=Vr(),cf=Jr(),lf=Gr(),af=Qr(),uf=ts(),hf=ns(),gf=is(),yf=fs(),mf=ls(),df=us(),en=class{static{c(this,"Collection")}constructor(t,n){this.name=t,this._store=new nf(n,t)}_load(){return this._store.readDocs()}_loadIndex(t,n){let r=this._store.readIndex();if(!r||r.fields.length===0)return null;if(r.sourceHash===n)return r;let s=hs(t,r.fields,n);return this._store.writeIndex(s),s}_commit(t){let n=(this._store.readIndex()||{fields:[]}).fields,r=this._store.writeDocs(t);n.length>0&&this._store.writeIndex(hs(t,n,r))}insertOne(t){return rf(this,t)}insertMany(t){return sf(this,t)}find(t){return of(this,t)}findOne(t){return ff(this,t)}countDocuments(t){return cf(this,t)}updateOne(t,n){return lf(this,t,n)}updateMany(t,n){return af(this,t,n)}deleteOne(t){return uf(this,t)}deleteMany(t){return hf(this,t)}createIndex(t){return gf(this,t)}dropIndex(t){return yf(this,t)}listIndexes(){return mf(this)}drop(){return df(this)}};gs.exports={Collection:en}});var ws=x((Dc,ds)=>{"use strict";var wf=Xt(),ys=Ve(),{Collection:pf}=nn(),{ValidationError:ms}=J(),{assertCollectionName:bf}=Y(),{isPlainObject:Sf}=st(),Bf=/^([A-Za-z0-9_-]{1,64})\.bson$/,rn=class{static{c(this,"DB")}constructor(t={}){if(!Sf(t))throw new ms('DB options must be an object, for example new DB({ dir: "./data" }).');let{dir:n=ys.join(process.cwd(),"data")}=t;if(typeof n!="string"||n.length===0)throw new ms('DB option "dir" must be a non-empty string.');this.dir=ys.resolve(n),this._collections=new Map}collection(t){return bf(t),this._collections.has(t)||this._collections.set(t,new pf(t,this.dir)),this._collections.get(t)}listCollections(){let t;try{t=wf.readdirSync(this.dir)}catch(n){if(n.code==="ENOENT")return[];throw n}return t.map(n=>Bf.exec(n)).filter(Boolean).map(n=>n[1]).sort()}};ds.exports={DB:rn}});var bs=x((jc,Ut)=>{"use strict";var{ObjectId:Nf}=(Mt(),Jt(Ft)),{DB:ps}=ws(),{Collection:Of}=nn(),Ef=J();Ut.exports=ps;Ut.exports.DB=ps;Ut.exports.Collection=Of;Ut.exports.ObjectId=Nf;Object.assign(Ut.exports,Ef)});var Af=x((Cc,Ss)=>{var If=bs(),Tf=(Mt(),Jt(Ft)),$f=Xt();Ss.exports={DB:If,BSON:Tf,fs:$f}});return Af();})();
+</script>
+<script>
+(function () {
+  'use strict';
+  const { DB, BSON, fs } = YDB;
+  const { ObjectId } = BSON;
+  const DIR = '/data';
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const fmt = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+  const base = (p) => p.slice(p.lastIndexOf('/') + 1);
+  const isOid = (v) => v && typeof v === 'object' && v._bsontype === 'ObjectId';
+  const decode = (bytes) => BSON.deserialize(bytes, { promoteBuffers: true });
+
+  /* ---------------- recording every file system call ---------------- */
+  let events = null; // array while an operation runs
+  fs.__on((e) => { if (events) events.push(e); });
+
+  /* ---------------- state ---------------- */
+  let db;
+  const state = { ops: [], selFile: `${DIR}/users.bson`, selDoc: 0, viewBytes: null, viewLabel: '', selStep: null, showAll: false, lastColl: 'users' };
+
+  /* ---------------- wrapping collections so each call is traced ---------------- */
+  const OPS = new Set(['insertOne', 'insertMany', 'find', 'findOne', 'countDocuments', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany', 'createIndex', 'dropIndex', 'listIndexes', 'drop']);
+  const wrapCache = new Map();
+  function wrap(coll) {
+    if (wrapCache.has(coll)) return wrapCache.get(coll);
+    const proxy = new Proxy(coll, {
+      get(target, prop) {
+        const value = target[prop];
+        if (typeof value !== 'function' || !OPS.has(prop)) return value;
+        return (...args) => {
+          const file = `${DIR}/${target.name}.bson`;
+          const before = fs.__files.has(file) ? decode(fs.__files.get(file)).data : null;
+          events = [];
+          const op = { coll: target.name, method: prop, args, before, events, beforeBytes: fs.__files.get(file) || null, hadIndex: fs.__files.has(file.replace('.bson', '.index.bson')) };
+          try {
+            op.result = value.apply(target, args);
+            return op.result;
+          } catch (err) {
+            op.error = err;
+            throw err;
+          } finally {
+            events = null;
+            op.after = fs.__files.has(file) ? decode(fs.__files.get(file)).data : null;
+            op.afterBytes = fs.__files.get(file) || null;
+            op.hasIndex = fs.__files.has(file.replace('.bson', '.index.bson'));
+            state.ops.push(op);
+          }
+        };
+      },
+    });
+    wrapCache.set(coll, proxy);
+    return proxy;
+  }
+  function makeDb() {
+    const real = new DB({ dir: DIR });
+    return new Proxy(real, {
+      get(target, prop) {
+        if (prop === 'collection') return (name) => wrap(target.collection(name));
+        const v = target[prop];
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+  }
+
+  /* ---------------- values shown as code ---------------- */
+  function show(v, ind = '') {
+    if (isOid(v)) return `<span class="v-oid">ObjectId("${v.toHexString()}")</span>`;
+    if (v instanceof Date) return `<span class="v-date">Date("${v.toISOString()}")</span>`;
+    if (v === null || v === undefined) return `<span class="v-null">${v === null ? 'null' : 'undefined'}</span>`;
+    if (typeof v === 'string') return `<span class="v-str">${esc(JSON.stringify(v))}</span>`;
+    if (typeof v === 'number') return `<span class="v-num">${Number.isNaN(v) ? 'NaN' : v}</span>`;
+    if (typeof v === 'boolean') return `<span class="v-bool">${v}</span>`;
+    if (v instanceof Uint8Array) return `<span class="v-oid">Binary(${v.length} bytes)</span>`;
+    if (Array.isArray(v)) return v.length ? `<span class="brace">[</span>${v.map((x) => show(x, ind)).join('<span class="brace">, </span>')}<span class="brace">]</span>` : '<span class="brace">[]</span>';
+    if (typeof v === 'object') {
+      const e = Object.entries(v);
+      if (!e.length) return '<span class="brace">{}</span>';
+      return `<span class="brace">{ </span>${e.map(([k, x]) => `<span class="k">${esc(k)}</span>: ${show(x, ind)}`).join('<span class="brace">, </span>')}<span class="brace"> }</span>`;
+    }
+    return esc(String(v));
+  }
+  function plain(v, ind = '') {
+    if (isOid(v)) return `ObjectId("${v.toHexString()}")`;
+    if (v instanceof Date) return `Date("${v.toISOString()}")`;
+    if (v === undefined) return 'undefined';
+    if (v === null || typeof v !== 'object') return typeof v === 'string' ? JSON.stringify(v) : String(v);
+    if (v instanceof Uint8Array) return `Binary(${v.length} bytes)`;
+    const n = `${ind}  `;
+    if (Array.isArray(v)) return v.length ? `[\n${v.map((x) => n + plain(x, n)).join(',\n')}\n${ind}]` : '[]';
+    const e = Object.entries(v);
+    return e.length ? `{\n${e.map(([k, x]) => `${n}${k}: ${plain(x, n)}`).join(',\n')}\n${ind}}` : '{}';
+  }
+  const sig = (v) => plain(v);
+  const idKey = (d) => (d && d._id !== undefined ? sig(d._id) : null);
+
+  /* ---------------- BSON byte map ---------------- */
+  const TYPES = { 1: 'number (double)', 2: 'string', 3: 'embedded document', 4: 'array', 5: 'binary', 7: 'ObjectId', 8: 'boolean', 9: 'date', 10: 'null', 16: 'number (int32)', 18: 'number (int64)', 19: 'decimal128' };
+  function mapBson(bytes) {
+    const segs = [];
+    const docs = [];
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const td = new TextDecoder();
+    const cstr = (o) => { let e = o; while (e < bytes.length && bytes[e] !== 0) e++; return [td.decode(bytes.subarray(o, e)), e + 1]; };
+    function doc(o, label, depth, isArray) {
+      const len = dv.getInt32(o, true);
+      segs.push({ s: o, e: o + 4, role: 'len', text: `${label} starts: its total length is ${len} bytes (int32, little-endian)` });
+      let p = o + 4;
+      const end = o + len - 1;
+      while (p < end) {
+        const type = bytes[p];
+        segs.push({ s: p, e: p + 1, role: 'type', text: `Type byte 0x${type.toString(16).padStart(2, '0')}: the next value is a ${TYPES[type] || 'unknown type'}` });
+        const [key, after] = cstr(p + 1);
+        const name = isArray ? `item [${key}]` : `field "${key}"`;
+        segs.push({ s: p + 1, e: after, role: 'key', text: `${isArray ? 'Array index' : 'Field name'} "${key}", ending with a 00 byte` });
+        p = after;
+        switch (type) {
+          case 1: segs.push({ s: p, e: p + 8, role: 'val', text: `Value of ${name}: ${dv.getFloat64(p, true)} (8-byte double)` }); p += 8; break;
+          case 2: {
+            const sl = dv.getInt32(p, true);
+            segs.push({ s: p, e: p + 4, role: 'len', text: `String length: ${sl} bytes, including the closing 00` });
+            const str = td.decode(bytes.subarray(p + 4, p + 4 + sl - 1));
+            segs.push({ s: p + 4, e: p + 4 + sl, role: 'val', text: `Value of ${name}: "${str}" as UTF-8 text` });
+            p += 4 + sl; break;
+          }
+          case 3: case 4: {
+            const sub = dv.getInt32(p, true);
+            const isDocList = depth === 0 && key === 'data' && type === 4;
+            doc(p, type === 4 ? `Array ${name}` : `Embedded document ${name}`, depth + 1, type === 4);
+            if (isDocList) collectDocs(p);
+            p += sub; break;
+          }
+          case 5: {
+            const bl = dv.getInt32(p, true);
+            segs.push({ s: p, e: p + 5, role: 'len', text: `Binary length ${bl} and subtype ${bytes[p + 4]}` });
+            segs.push({ s: p + 5, e: p + 5 + bl, role: 'val', text: `Binary data of ${name} (${bl} bytes)` });
+            p += 5 + bl; break;
+          }
+          case 7: segs.push({ s: p, e: p + 12, role: 'oid', text: `ObjectId of ${name}: ${[...bytes.subarray(p, p + 12)].map((b) => b.toString(16).padStart(2, '0')).join('')} (12 bytes)` }); p += 12; break;
+          case 8: segs.push({ s: p, e: p + 1, role: 'val', text: `Value of ${name}: ${bytes[p] ? 'true' : 'false'}` }); p += 1; break;
+          case 9: segs.push({ s: p, e: p + 8, role: 'val', text: `Value of ${name}: ${new Date(Number(dv.getBigInt64(p, true))).toISOString()} (milliseconds since 1970, int64)` }); p += 8; break;
+          case 10: break;
+          case 16: segs.push({ s: p, e: p + 4, role: 'val', text: `Value of ${name}: ${dv.getInt32(p, true)} (4-byte integer)` }); p += 4; break;
+          case 18: segs.push({ s: p, e: p + 8, role: 'val', text: `Value of ${name}: ${dv.getBigInt64(p, true)} (8-byte integer)` }); p += 8; break;
+          case 19: segs.push({ s: p, e: p + 16, role: 'val', text: `Decimal128 value of ${name}` }); p += 16; break;
+          default: return;
+        }
+      }
+      segs.push({ s: end, e: end + 1, role: 'end', text: `00: end of ${label.charAt(0).toLowerCase()}${label.slice(1)}` });
+    }
+    function collectDocs(arrStart) {
+      // walk the array's elements to find each document's byte range
+      let p = arrStart + 4;
+      const end = arrStart + dv.getInt32(arrStart, true) - 1;
+      while (p < end) {
+        const [, after] = cstr(p + 1);
+        const len = dv.getInt32(after, true);
+        docs.push({ s: p, e: after + len });
+        p = after + len;
+      }
+    }
+    try { doc(0, 'The file', 0, false); } catch (e) { /* show what we could map */ }
+    const owner = new Int32Array(bytes.length).fill(-1);
+    segs.forEach((g, i) => { for (let b = g.s; b < g.e; b++) owner[b] = i; });
+    return { segs, owner, docs };
+  }
+
+  /* ---------------- step timeline ---------------- */
+  function describeArgs(args) {
+    try { return args.map((a) => plain(a).replace(/\s*\n\s*/g, ' ')).join(', '); } catch { return '…'; }
+  }
+  function middleStep(op) {
+    const n = (x) => (Array.isArray(x) ? x.length : 0);
+    switch (op.method) {
+      case 'insertOne': return op.result ? { ic: 'mem', t: 'Give the new document an _id and add it to the end of the array', d: `_id ${plain(op.result.insertedId)}` } : null;
+      case 'insertMany': return op.result ? { ic: 'mem', t: `Give ${op.result.insertedCount} documents an _id each and add them to the array`, d: Object.values(op.result.insertedIds).map(plain).join('\n') } : null;
+      case 'find': case 'findOne': case 'countDocuments': {
+        const k = op.method === 'find' ? n(op.result) : op.method === 'findOne' ? (op.result ? 1 : 0) : op.result;
+        const usedIndex = op.events.some((e) => e.type === 'read' && e.path.endsWith('.index.bson'));
+        return { ic: 'mem', t: usedIndex ? `Check the index first, then confirm each candidate: ${k} match` : `Compare every document in memory with the query: ${k} match`, d: `${n(op.before)} documents in the array` };
+      }
+      case 'updateOne': case 'updateMany': return op.result ? { ic: 'mem', t: `Apply $set in memory: ${op.result.matchedCount} matched, ${op.result.modifiedCount} changed`, d: op.result.modifiedCount ? 'changed documents are rewritten with the rest' : 'nothing changed, so nothing is written' } : null;
+      case 'deleteOne': case 'deleteMany': return op.result ? { ic: 'mem', t: `Remove ${op.result.deletedCount} document${op.result.deletedCount === 1 ? '' : 's'} from the array`, d: op.result.deletedCount ? '' : 'nothing removed, so nothing is written' } : null;
+      case 'createIndex': return { ic: 'mem', t: `Build the index: for each value of "${typeof op.args[0] === 'string' ? op.args[0] : Object.keys(op.args[0] || {})[0]}", list the positions of the documents that have it`, d: '' };
+      default: return null;
+    }
+  }
+  function stepsFor(op) {
+    const out = [{ ic: 'call', cls: 'call', t: `${op.coll}.${op.method}(${esc(describeArgs(op.args))})`, d: '', fx: { kind: 'call' } }];
+    const collFile = `${DIR}/${op.coll}.bson`;
+    const writes = new Set(['insertOne', 'insertMany', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany', 'createIndex']);
+    let middleDone = false;
+    const mid = middleStep(op);
+    const pushMid = () => { if (!middleDone && mid) out.push({ ...mid, fx: { kind: 'mid' } }); middleDone = true; };
+    const readColl = op.events.some((e) => e.type === 'read' && e.path === collFile);
+    if (!readColl && !op.error && op.method !== 'drop' && op.method !== 'listIndexes' && op.method !== 'dropIndex') {
+      out.push({ ic: 'disk', t: `No ${base(collFile)} yet, so start with an empty array`, d: '', fx: { kind: 'empty' } });
+    }
+    for (const e of op.events) {
+      if (e.type === 'read') {
+        const isIdx = e.path.endsWith('.index.bson');
+        if (isIdx) { out.push({ ic: 'disk', t: `Read the index file ${base(e.path)}`, d: fmt(e.bytes.length), bytes: e.bytes, path: e.path, fx: { kind: 'readIndex', bytes: e.bytes } }); continue; }
+        let count = '?';
+        try { count = decode(e.bytes).data.length; } catch { /* corrupt */ }
+        out.push({ ic: 'disk', t: `Read the whole file ${base(e.path)} from disk`, d: fmt(e.bytes.length), bytes: e.bytes, path: e.path, fx: { kind: 'read', bytes: e.bytes } });
+        out.push({ ic: 'mem', t: `Decode the BSON bytes into a JavaScript array of ${count} document${count === 1 ? '' : 's'}`, d: 'now the data is in memory', fx: { kind: 'decode', bytes: e.bytes } });
+      } else if (e.type === 'write') {
+        if (e.path.startsWith(collFile) && !e.path.includes('.index.')) pushMid();
+        const target = e.path.replace(/\.\d+\.[0-9a-f]+\.tmp$/, '');
+        out.push({ ic: 'disk', t: `Encode ${target.endsWith('.index.bson') ? 'the index' : 'the whole array'} as BSON and write it to a temporary file`, d: `${base(e.path)} · ${fmt(e.bytes.length)}`, bytes: e.bytes, path: target, fx: { kind: 'write', bytes: e.bytes, tmp: base(e.path), index: target.endsWith('.index.bson') } });
+      } else if (e.type === 'rename') {
+        out.push({ ic: 'disk', t: `Rename the temporary file to ${base(e.to)}: the old version is replaced in one step, so a crash can’t leave half a file`, d: '', fx: { kind: 'rename', index: e.to.endsWith('.index.bson'), bytes: e.bytes } });
+      } else if (e.type === 'unlink') {
+        out.push({ ic: 'disk', t: `Delete ${base(e.path)}`, d: '', fx: { kind: 'unlink' } });
+      }
+    }
+    if (!writes.has(op.method) || !middleDone) pushMid();
+    if (op.error) out.push({ ic: '!', t: `Stopped with ${op.error.name}`, d: op.error.message, fx: { kind: 'error' } });
+    else out.push({ ic: '↩', t: 'Return the result to your code', d: '', fx: { kind: 'return' } });
+    out.forEach((st) => { st.op = op; });
+    return out;
+  }
+  function renderSteps() {
+    const list = $('steps');
+    if (!state.ops.length) { list.innerHTML = '<li class="empty">Run some code to see each step here.</li>'; return; }
+    const all = [];
+    state.ops.forEach((op) => stepsFor(op).forEach((s) => all.push(s)));
+    state.stepList = all;
+    list.innerHTML = all.map((s, i) => `<li class="step ${s.cls || ''}" data-i="${i}" tabindex="0" ${s.bytes ? 'data-has-bytes' : ''} aria-selected="${state.selStep === i}" aria-current="${flow.i === i}"><span class="ic ${s.ic === 'disk' ? 'disk' : s.ic === 'mem' ? 'mem' : s.ic === 'call' ? 'call' : ''}">${s.ic === 'disk' ? 'DISK' : s.ic === 'mem' ? 'RAM' : s.ic === 'call' ? 'JS' : esc(s.ic)}</span><span><span class="tt">${s.t}</span>${s.d ? `<div class="dd">${esc(s.d)}</div>` : ''}</span></li>`).join('');
+  }
+  function pickStep(i) {
+    const s = state.stepList[i];
+    if (!s || !s.bytes) return;
+    state.selStep = i;
+    state.viewBytes = s.bytes;
+    state.viewLabel = `${base(s.path)} at this step`;
+    state.selFile = s.path;
+    renderAll(false);
+  }
+  const stepClick = (li) => { if (!li) return; pause(); goTo(+li.dataset.i); if (li.hasAttribute('data-has-bytes')) pickStep(+li.dataset.i); };
+  $('steps').addEventListener('click', (e) => stepClick(e.target.closest('.step[data-i]')));
+  $('steps').addEventListener('keydown', (e) => { if (e.key === 'Enter') stepClick(e.target.closest('.step[data-i]')); });
+
+  /* ---------------- disk ---------------- */
+  function renderDisk(flash) {
+    const files = [...fs.__files.keys()].filter((f) => f.startsWith(`${DIR}/`) && !f.endsWith('.tmp')).sort();
+    if (!files.includes(state.selFile) && files.length) state.selFile = files.find((f) => f.endsWith('.bson') && !f.includes('.index.')) || files[0];
+    $('tree').innerHTML = `<div class="dir">data/</div>${files.length ? files.map((f) => `<button type="button" class="file ${flash.has(f) ? 'flash' : ''}" aria-pressed="${f === state.selFile}" data-f="${f}"><span>${esc(base(f))}</span><span class="sz">${fmt(fs.__files.get(f).length)}</span></button>`).join('') : '<p class="empty">The folder is empty. Insert a document to create a file.</p>'}`;
+    const sel = fs.__files.get(state.selFile);
+    let info = '';
+    if (sel) {
+      try {
+        const v = decode(sel);
+        info = state.selFile.includes('.index.') ? `Index on ${v.fields.map((f) => `"${f}"`).join(', ')}, built from a file with SHA-1 ${String(v.sourceHash).slice(0, 10)}…` : `Holds { data: [ ${v.data.length} document${v.data.length === 1 ? '' : 's'} ] }`;
+      } catch { info = 'This file cannot be decoded.'; }
+    }
+    $('diskinfo').textContent = info;
+  }
+  $('tree').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-f]');
+    if (!b) return;
+    state.selFile = b.dataset.f;
+    state.viewBytes = null;
+    state.selStep = null;
+    state.selDoc = 0;
+    renderAll(false);
+  });
+
+  /* ---------------- memory ---------------- */
+  function lastOpFor(coll) { for (let i = state.ops.length - 1; i >= 0; i--) if (state.ops[i].coll === coll) return state.ops[i]; return null; }
+  function renderMemory() {
+    const file = state.selFile;
+    const bytes = state.viewBytes || fs.__files.get(file);
+    $('oid').innerHTML = '';
+    if (!bytes) { $('memwhere').textContent = ''; $('docs').innerHTML = '<p class="empty">Nothing in memory yet.</p>'; return; }
+    let value;
+    try { value = decode(bytes); } catch { $('docs').innerHTML = '<p class="empty">These bytes are not valid BSON.</p>'; return; }
+
+    if (file.includes('.index.')) {
+      $('memwhere').textContent = `index of ${base(file).replace('.index.bson', '')}`;
+      $('memsub').textContent = 'The index maps each value to the positions of the documents that have it, so a lookup can skip the other documents.';
+      $('docs').innerHTML = `<div class="idxview">${value.entries.map((en) => `<div><b>${esc(en.field)}</b>${en.keys.map(([k, pos]) => `<div class="row"><span>${esc(prettyKey(k))}</span><span class="brace">→</span>${pos.map((p) => `<span class="pos">#${p}</span>`).join('')}</div>`).join('')}</div>`).join('')}</div>`;
+      return;
+    }
+
+    const coll = base(file).replace('.bson', '');
+    $('memwhere').textContent = `${coll} = [ … ]`;
+    $('memsub').textContent = 'When youssefdb opens a file, it turns the bytes back into a JavaScript array. Click a document.';
+    const docs = value.data;
+    const op = state.viewBytes ? null : lastOpFor(coll);
+    const before = op && op.before ? op.before : null;
+    const beforeMap = new Map((before || []).map((d) => [idKey(d), d]));
+    const afterKeys = new Set(docs.map(idKey));
+    const hits = new Set();
+    if (op && !op.error) {
+      if (op.method === 'find') (op.result || []).forEach((d) => hits.add(idKey(d)));
+      if (op.method === 'findOne' && op.result) hits.add(idKey(op.result));
+    }
+    const fresh = op && !op.error && /insert/.test(op.method);
+    const items = docs.map((d, i) => {
+      const k = idKey(d);
+      const old = beforeMap.get(k);
+      let cls = '';
+      let tag = '';
+      const changed = new Set();
+      if (op && !op.error) {
+        if (fresh && !old) { cls = 'new'; tag = 'new'; }
+        else if (old) {
+          for (const f of new Set([...Object.keys(d), ...Object.keys(old)])) if (sig(d[f]) !== sig(old[f])) changed.add(f);
+          if (changed.size) { cls = 'chg'; tag = 'changed'; }
+        }
+        if (hits.has(k)) { cls = 'hit'; tag = 'returned'; }
+      }
+      return { d, i, cls, tag, changed };
+    });
+    const deleted = op && !op.error && before ? before.filter((d) => !afterKeys.has(idKey(d))) : [];
+    if (state.selDoc >= docs.length) state.selDoc = Math.max(0, docs.length - 1);
+    const html = items.map(({ d, i, cls, tag, changed }) => `<div class="doc ${cls}" data-i="${i}" tabindex="0" aria-selected="${i === state.selDoc}"><span class="idx">#${i}</span><span class="brace">{</span>${tag ? `<span class="tag">${tag}</span>` : ''}${Object.entries(d).map(([k, v]) => `<span class="kv ${changed.has(k) ? 'changed' : ''}"><span class="k">${esc(k)}</span>: ${show(v)}</span>`).join('')}<span class="brace">}</span></div>`);
+    deleted.forEach((d) => html.push(`<div class="doc del"><span class="brace">{</span><span class="tag">deleted</span>${Object.entries(d).map(([k, v]) => `<span class="kv"><span class="k">${esc(k)}</span>: ${show(v)}</span>`).join('')}<span class="brace">}</span></div>`));
+    $('docs').innerHTML = html.length ? html.join('') : '<p class="empty">The array is empty: [ ]</p>';
+    const sel = docs[state.selDoc];
+    if (sel && isOid(sel._id)) renderOid(sel._id);
+    const selEl = $('docs').querySelector('.doc[aria-selected="true"]');
+    if (selEl) {
+      const box = $('docs');
+      const top = selEl.offsetTop - box.offsetTop;
+      if (top < box.scrollTop || top + selEl.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = Math.max(0, top - 8);
+    }
+  }
+  function prettyKey(k) {
+    const t = k[0];
+    const rest = k.slice(1);
+    if (t === 's') return rest;
+    if (t === 'n' || t === 'b') return rest;
+    if (t === 'o') return `ObjectId("${rest}")`;
+    if (t === 'd') return `Date(${new Date(+rest).toISOString()})`;
+    return 'null / missing';
+  }
+  function renderOid(id) {
+    const hex = id.toHexString();
+    const bytes = hex.match(/../g);
+    const ts = parseInt(hex.slice(0, 8), 16);
+    const counter = parseInt(hex.slice(18), 16);
+    $('oid').innerHTML = `<div class="oid"><div class="sub">This document’s <code>_id</code> is an ObjectId: 12 bytes youssefdb creates on insert, unique without asking any server.</div>
+      <div class="bytes">${bytes.map((b, i) => `<span class="b ${i < 4 ? 'ts' : i < 9 ? 'rnd' : 'cnt'}">${b}</span>`).join('')}</div>
+      <div class="legend"><div class="ts">Bytes 1–4 · time<b>${new Date(ts * 1000).toISOString().replace('.000Z', 'Z')}</b>seconds since 1970, so ids sort by creation time</div>
+      <div class="rnd">Bytes 5–9 · random<b>${hex.slice(8, 18)}</b>picked once per process, so two machines don’t clash</div>
+      <div class="cnt">Bytes 10–12 · counter<b>${counter}</b>goes up by one for each new id</div></div></div>`;
+  }
+  $('docs').addEventListener('click', (e) => { const d = e.target.closest('.doc[data-i]'); if (d) { state.selDoc = +d.dataset.i; renderMemory(); renderBytes(true); } });
+  $('docs').addEventListener('keydown', (e) => { if (e.key === 'Enter') { const d = e.target.closest('.doc[data-i]'); if (d) { state.selDoc = +d.dataset.i; renderMemory(); renderBytes(true); } } });
+
+  /* ---------------- bytes ---------------- */
+  let currentMap = null;
+  const LIMIT = 1536;
+  function renderBytes(scrollToDoc) {
+    const bytes = state.viewBytes || fs.__files.get(state.selFile);
+    $('byteswhere').textContent = bytes ? (state.viewBytes ? state.viewLabel : base(state.selFile)) : '';
+    if (!bytes) { $('hex').innerHTML = '<p class="empty">No file selected.</p>'; $('more').hidden = true; currentMap = null; return; }
+    currentMap = mapBson(bytes);
+    const docRange = currentMap.docs[state.selDoc];
+    const shown = state.showAll ? bytes.length : Math.min(bytes.length, Math.max(LIMIT, docRange ? docRange.e + 64 : 0));
+    let out = '';
+    for (let o = 0; o < shown; o += 16) {
+      let cells = '';
+      let ascii = '';
+      for (let i = o; i < o + 16; i++) {
+        if (i >= shown) { cells += '<span class="c"> </span>'; continue; }
+        const g = segByOwner(currentMap.owner[i]);
+        const inDoc = docRange && i >= docRange.s && i < docRange.e ? ' indoc' : '';
+        cells += `<span class="c ${g ? `s-${g.role}` : ''}${inDoc}" data-b="${i}">${bytes[i].toString(16).padStart(2, '0')}</span>`;
+        const ch = bytes[i] > 31 && bytes[i] < 127 ? String.fromCharCode(bytes[i]) : '·';
+        ascii += `<span class="a">${esc(ch)}</span>`;
+      }
+      out += `<div class="row"><span class="off">${o.toString(16).padStart(4, '0')}</span><span class="cells">${cells}</span><span class="ascii">${ascii}</span></div>`;
+    }
+    $('hex').innerHTML = out;
+    $('more').hidden = shown >= bytes.length;
+    $('more').textContent = `Show all ${fmt(bytes.length)}`;
+    if (scrollToDoc && docRange) {
+      const el = $('hex').querySelector(`[data-b="${docRange.s}"]`);
+      if (el) $('hexwrap').scrollTop = el.offsetTop - 40;
+      $('caption').innerHTML = `Document #${state.selDoc} is bytes ${docRange.s}–${docRange.e - 1} of the file (${docRange.e - docRange.s} bytes), underlined below.<div class="r">Inside the file, the documents sit one after another in an array called “data”.</div>`;
+    }
+  }
+  const segByOwner = (i) => (i >= 0 && currentMap ? currentMap.segs[i] : null);
+  $('hex').addEventListener('mouseover', (e) => {
+    const c = e.target.closest('[data-b]');
+    if (!c || !currentMap) return;
+    const i = +c.dataset.b;
+    const g = segByOwner(currentMap.owner[i]);
+    $('hex').querySelectorAll('.on').forEach((x) => x.classList.remove('on'));
+    if (!g) return;
+    for (let b = g.s; b < g.e; b++) { const el = $('hex').querySelector(`[data-b="${b}"]`); if (el) el.classList.add('on'); }
+    $('caption').innerHTML = `${esc(g.text)}<div class="r">byte${g.e - g.s > 1 ? 's' : ''} ${g.s}${g.e - g.s > 1 ? `–${g.e - 1}` : ''} · ${g.e - g.s} byte${g.e - g.s > 1 ? 's' : ''}</div>`;
+  });
+  $('more').addEventListener('click', () => { state.showAll = true; renderBytes(false); });
+
+  /* ---------------- animated flow: code → memory → encoder → disk ---------------- */
+  const flow = { i: -1, playing: false, timer: null };
+  const SPEED = 1500;
+  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function summary(d) {
+    const parts = Object.entries(d).filter(([k]) => k !== '_id').slice(0, 2).map(([, v]) => (typeof v === 'string' ? v : plain(v).replace(/\s*\n\s*/g, ' ')));
+    return parts.join(' · ') || '{ }';
+  }
+  function fieldBlocks(doc) {
+    // one block group per top-level field: [type + name] then [value], widths follow byte counts
+    let bytes;
+    try { bytes = BSON.serialize(doc); } catch { return ''; }
+    const groups = [];
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let p = 4;
+    const end = bytes.length - 1;
+    while (p < end) {
+      const type = bytes[p];
+      let q = p + 1;
+      while (bytes[q] !== 0) q++;
+      const key = new TextDecoder().decode(bytes.subarray(p + 1, q));
+      const vs = q + 1;
+      let ve = vs;
+      if (type === 1 || type === 9 || type === 18) ve = vs + 8;
+      else if (type === 2) ve = vs + 4 + dv.getInt32(vs, true);
+      else if (type === 3 || type === 4) ve = vs + dv.getInt32(vs, true);
+      else if (type === 5) ve = vs + 5 + dv.getInt32(vs, true);
+      else if (type === 7) ve = vs + 12;
+      else if (type === 8) ve = vs + 1;
+      else if (type === 10) ve = vs;
+      else if (type === 16) ve = vs + 4;
+      else if (type === 19) ve = vs + 16;
+      else break;
+      groups.push({ key, head: vs - p, val: ve - vs, type });
+      p = ve;
+    }
+    const unit = (n) => `${Math.max(n, 1)}fr`;
+    const cols = ['4fr'].concat(groups.flatMap((g) => [unit(g.head), ...(g.val ? [unit(g.val)] : [])])).concat(['1fr']).join(' ');
+    const cells = ['<span class="blk s-len" title="document length, 4 bytes"></span>']
+      .concat(groups.flatMap((g) => [`<span class="blk s-key" title="type byte + field name &quot;${esc(g.key)}&quot;: ${g.head} bytes"></span>`, ...(g.val ? [`<span class="blk ${g.type === 7 ? 's-oid' : 's-val'}" title="value of ${esc(g.key)}: ${g.val} bytes"></span>`] : [])]))
+      .concat(['<span class="blk s-end" title="end marker"></span>']).join('');
+    const labels = groups.map((g) => `<span><b>${esc(g.key)}</b> ${g.head + g.val} B</span>`).join('');
+    return `<div class="strip" style="grid-template-columns:${cols}">${cells}</div><div class="striplabels">${labels}</div><div class="stripnote">${bytes.length} bytes for this document</div>`;
+  }
+  function fileBar(bytes, cls = '') {
+    if (!bytes) return '<div class="fbar empty"></div>';
+    let m;
+    try { m = mapBson(bytes); } catch { return '<div class="fbar"></div>'; }
+    const total = bytes.length;
+    const parts = [];
+    let p = 0;
+    m.docs.forEach((r, i) => {
+      if (r.s > p) parts.push(`<span class="seg hdr" style="flex:${r.s - p}"></span>`);
+      parts.push(`<span class="seg doc ${i % 2 ? 'alt' : ''}" style="flex:${r.e - r.s}" title="document #${i}: ${r.e - r.s} bytes"></span>`);
+      p = r.e;
+    });
+    if (p < total) parts.push(`<span class="seg hdr" style="flex:${total - p}"></span>`);
+    return `<div class="fbar ${cls}">${parts.join('')}</div>`;
+  }
+
+  function flowState(i) {
+    const all = state.stepList || [];
+    const step = all[i];
+    const op = step.op;
+    const mine = all.filter((s) => s.op === op);
+    const k = mine.indexOf(step);
+    const upto = mine.slice(0, k + 1);
+    const has = (fn) => upto.some(fn);
+    const readOnly = !/insert|update|delete|createIndex/.test(op.method);
+    return {
+      step, op, k, n: mine.length,
+      loaded: has((s) => s.fx.kind === 'decode' || s.fx.kind === 'empty'),
+      midPassed: has((s) => s.fx.kind === 'mid') || (readOnly && has((s) => s.fx.kind === 'return')),
+      renamedMain: has((s) => s.fx.kind === 'rename' && !s.fx.index),
+      writingMain: has((s) => s.fx.kind === 'write' && !s.fx.index) && !has((s) => s.fx.kind === 'rename' && !s.fx.index),
+      writingIndex: has((s) => s.fx.kind === 'write' && s.fx.index) && !has((s) => s.fx.kind === 'rename' && s.fx.index),
+      indexShown: op.hadIndex || has((s) => s.fx.index),
+      tmp: (upto.filter((s) => s.fx.kind === 'write').pop() || { fx: {} }).fx.tmp,
+    };
+  }
+
+  const STATIONS = { call: 'code', empty: 'disk', read: 'disk', decode: 'mem', readIndex: 'disk', mid: 'mem', write: 'enc', rename: 'disk', unlink: 'disk', return: 'code', error: 'code' };
+  const PIPES = { call: { p1: 'fwd' }, read: { p3: 'back' }, readIndex: { p3: 'back' }, decode: { p2: 'back' }, write: { p2: 'fwd', p3: 'fwd' }, return: { p1: 'back' }, error: { p1: 'back' } };
+
+  function renderFlow() {
+    const all = state.stepList || [];
+    if (flow.i < 0 || !all.length) {
+      $('flowcap').innerHTML = 'Run some code to watch your data move.';
+      $('flowcount').textContent = '';
+      ['code', 'mem', 'enc', 'disk'].forEach((s) => { $(`st-${s}`).classList.remove('active'); });
+      return;
+    }
+    const st = flowState(flow.i);
+    const { step, op } = st;
+    const kind = step.fx.kind;
+
+    // stations and pipes
+    ['code', 'mem', 'enc', 'disk'].forEach((s) => $(`st-${s}`).classList.toggle('active', STATIONS[kind] === s));
+    $('st-code').classList.toggle('bad', kind === 'error');
+    ['p1', 'p2', 'p3'].forEach((p) => {
+      const dir = (PIPES[kind] || {})[p];
+      const el = $(p);
+      el.className = `pipe ${dir || ''}`;
+      let label = '';
+      if (dir) {
+        if (kind === 'call') label = `${op.method}()`;
+        else if (kind === 'read' || kind === 'readIndex' || (kind === 'write' && p === 'p3')) label = fmt(step.fx.bytes.length);
+        else if (kind === 'decode') label = `${(op.before || []).length} docs`;
+        else if (kind === 'write' && p === 'p2') label = step.fx.index ? 'index' : `${(op.after || []).length} docs`;
+        else if (kind === 'return') label = 'result';
+        else if (kind === 'error') label = 'error';
+      }
+      el.querySelector('.pkt').textContent = label;
+    });
+
+    // code
+    let codeBody = `<code class="call">${esc(op.coll)}.${esc(op.method)}(${esc(describeArgs(op.args))})</code>`;
+    if (kind === 'return') {
+      const r = op.result;
+      const txt = Array.isArray(r) ? `${r.length} document${r.length === 1 ? '' : 's'} returned` : r && typeof r === 'object' ? plain(r).replace(/\s*\n\s*/g, ' ') : String(r);
+      codeBody += `<div class="ret">← ${esc(txt)}</div>`;
+    }
+    if (kind === 'error') codeBody += `<div class="ret bad">✕ ${esc(op.error.name)}</div>`;
+    $('sb-code').innerHTML = codeBody;
+
+    // memory
+    let memBody;
+    if (!st.loaded) memBody = '<p class="idle">Empty. Nothing is in memory until a file is read.</p>';
+    else {
+      const showAfter = st.midPassed;
+      const docs = (showAfter ? op.after : op.before) || [];
+      const before = op.before || [];
+      const bmap = new Map(before.map((d) => [idKey(d), d]));
+      const hits = new Set();
+      if (showAfter && op.method === 'find') (op.result || []).forEach((d) => hits.add(idKey(d)));
+      if (showAfter && op.method === 'findOne' && op.result) hits.add(idKey(op.result));
+      const animNow = kind === 'mid' && !reduceMotion;
+      const scanning = animNow && /find|count/.test(op.method);
+      const tiles = docs.map((d, i) => {
+        const key = idKey(d);
+        const old = bmap.get(key);
+        let cls = '';
+        if (showAfter && /insert/.test(op.method) && !old) cls = 'new';
+        else if (showAfter && old && sig(old) !== sig(d)) cls = 'chg';
+        if (hits.has(key)) cls = 'hit';
+        return `<div class="tile ${cls} ${animNow ? 'anim' : ''} ${scanning ? 'scan' : ''}" style="--d:${i * 90}ms" title="${esc(plain(d).replace(/\s*\n\s*/g, ' '))}"><span class="ti">#${i}</span><span class="tt">${esc(summary(d))}</span></div>`;
+      });
+      if (showAfter && op.after) {
+        const ak = new Set(op.after.map(idKey));
+        before.filter((d) => !ak.has(idKey(d))).forEach((d) => tiles.push(`<div class="tile del ${animNow ? 'anim' : ''}"><span class="ti">✕</span><span class="tt">${esc(summary(d))}</span></div>`));
+      }
+      memBody = `<div class="arrlabel">${esc(op.coll)} = [ ${docs.length} document${docs.length === 1 ? '' : 's'} ]</div><div class="tiles">${tiles.join('') || '<span class="idle">[ ] empty array</span>'}</div>`;
+    }
+    $('sb-mem').innerHTML = memBody;
+
+    // encoder
+    let enc = '<p class="idle">Waiting. It turns objects into bytes on the way to disk, and bytes back into objects on the way in.</p>';
+    if (kind === 'read' || kind === 'decode') {
+      enc = `<div class="encmode">${kind === 'read' ? 'Bytes arriving from disk' : 'Decoding bytes → objects'}</div>${fileBar(step.fx.bytes, kind === 'decode' ? 'dim' : '')}<div class="stripnote">each block is one document inside the file</div>`;
+    } else if (kind === 'readIndex') {
+      enc = `<div class="encmode">Decoding the index</div><div class="stripnote">${fmt(step.fx.bytes.length)} of value → positions</div>`;
+    } else if (kind === 'write' && step.fx.index) {
+      enc = `<div class="encmode">Encoding the index → ${fmt(step.fx.bytes.length)}</div><div class="stripnote">each value is stored with the positions of its documents</div>`;
+    } else if (kind === 'write') {
+      const after = op.after || [];
+      const bmap = new Map((op.before || []).map((d) => [idKey(d), d]));
+      const focus = after.find((d) => !bmap.has(idKey(d))) || after.find((d) => sig(d) !== sig(bmap.get(idKey(d)))) || after[0];
+      enc = `<div class="encmode">Encoding objects → BSON bytes</div>${focus ? `<div class="focus">${esc(summary(focus))}</div>${fieldBlocks(focus)}` : ''}<div class="stripnote">then the whole array of ${after.length} document${after.length === 1 ? '' : 's'}: ${fmt(step.fx.bytes.length)}</div>`;
+    }
+    $('sb-enc').innerHTML = enc;
+
+    // disk
+    const mainBytes = st.renamedMain ? op.afterBytes : op.beforeBytes;
+    const rows = [];
+    rows.push(`<div class="frow ${kind === 'read' ? 'reading' : ''} ${kind === 'rename' && !step.fx.index ? 'swap' : ''}"><span class="fname">${esc(op.coll)}.bson</span><span class="fsz">${mainBytes ? fmt(mainBytes.length) : 'no file yet'}</span>${fileBar(mainBytes)}</div>`);
+    if (st.writingMain) rows.push(`<div class="frow tmp"><span class="fname">${esc(st.tmp || 'temporary file')}</span><span class="fsz">writing…</span><div class="fbar fill"><span class="seg doc" style="flex:1"></span></div></div>`);
+    if (st.indexShown) rows.push(`<div class="frow idxrow ${kind === 'readIndex' ? 'reading' : ''} ${kind === 'rename' && step.fx.index ? 'swap' : ''} ${st.writingIndex ? 'pending' : ''}"><span class="fname">${esc(op.coll)}.index.bson</span><span class="fsz">${st.writingIndex ? 'writing…' : 'index'}</span></div>`);
+    $('sb-disk').innerHTML = `<div class="folder">data/</div>${rows.join('')}`;
+
+    // caption + controls
+    const extra = { call: 'Your code asks youssefdb to do something.', empty: 'There is no file to read yet, so youssefdb starts with an empty list.', read: 'The whole file is read, even if you only need one document.', decode: 'The bytes become JavaScript objects you can work with.', readIndex: 'The index tells youssefdb which documents could match, so it checks fewer of them.', mid: 'All changes happen in memory first. The disk has not changed yet.', write: 'Objects are turned back into bytes and written to a temporary file first.', rename: 'Swapping the files in one step means a crash leaves either the old file or the new one, never half of each.', unlink: '', return: 'The answer goes back to your code.', error: 'youssefdb stopped before changing anything on disk.' }[kind] || '';
+    $('flowcap').innerHTML = `<b>${step.t}</b>${extra ? `<span>${esc(extra)}</span>` : ''}`;
+    $('flowcount').textContent = `Step ${flow.i + 1} of ${all.length}`;
+    $('flowbar').style.width = `${((flow.i + 1) / all.length) * 100}%`;
+    $('play').textContent = flow.playing ? 'Pause' : flow.i >= all.length - 1 ? 'Replay' : 'Play';
+    $('prev').disabled = flow.i <= 0;
+    $('next').disabled = flow.i >= all.length - 1;
+    document.querySelectorAll('#steps .step').forEach((li) => li.setAttribute('aria-current', String(+li.dataset.i === flow.i)));
+  }
+  function goTo(i) {
+    const n = (state.stepList || []).length;
+    flow.i = Math.max(0, Math.min(n - 1, i));
+    renderFlow();
+  }
+  function pause() { flow.playing = false; clearTimeout(flow.timer); renderFlow(); }
+  function play() {
+    const n = (state.stepList || []).length;
+    if (!n) return;
+    if (flow.i >= n - 1) flow.i = -1;
+    flow.playing = true;
+    const tick = () => {
+      if (!flow.playing) return;
+      if (flow.i >= n - 1) { flow.playing = false; renderFlow(); return; }
+      goTo(flow.i + 1);
+      flow.timer = setTimeout(tick, SPEED);
+    };
+    tick();
+  }
+  $('play').addEventListener('click', () => (flow.playing ? pause() : play()));
+  $('prev').addEventListener('click', () => { pause(); goTo(flow.i - 1); });
+  $('next').addEventListener('click', () => { pause(); goTo(flow.i + 1); });
+
+  /* ---------------- run ---------------- */
+  function renderAll(scroll, flash = new Set()) {
+    renderSteps();
+    renderDisk(flash);
+    renderMemory();
+    renderBytes(scroll);
+  }
+  function run() {
+    const code = $('code').value;
+    const sizes = new Map([...fs.__files].map(([k, v]) => [k, v]));
+    state.ops = [];
+    state.selStep = null;
+    state.viewBytes = null;
+    state.showAll = false;
+    let res;
+    const users = db.collection('users');
+    try {
+      let fn;
+      try { fn = new Function('db', 'users', 'ObjectId', `"use strict"; return (${code.trim().replace(/;\s*$/, '')});`); } catch { fn = new Function('db', 'users', 'ObjectId', `"use strict"; ${code}`); }
+      res = fn(db, users, ObjectId);
+      $('result').classList.remove('err');
+      $('result').textContent = res === undefined ? 'Done.' : plain(res);
+    } catch (err) {
+      $('result').classList.add('err');
+      $('result').textContent = `${err.name}: ${err.message}`;
+    }
+    const flash = new Set([...fs.__files.keys()].filter((k) => sizes.get(k) !== fs.__files.get(k)));
+    const last = state.ops[state.ops.length - 1];
+    if (last) {
+      state.lastColl = last.coll;
+      const f = `${DIR}/${last.coll}.bson`;
+      if (fs.__files.has(f)) state.selFile = f;
+      if (/insert/.test(last.method) && fs.__files.has(f)) state.selDoc = decode(fs.__files.get(f)).data.length - 1;
+      else if ((last.method === 'find' || last.method === 'findOne') && last.result && fs.__files.has(f)) {
+        const first = Array.isArray(last.result) ? last.result[0] : last.result;
+        const idx = first ? decode(fs.__files.get(f)).data.findIndex((d) => idKey(d) === idKey(first)) : -1;
+        if (idx >= 0) state.selDoc = idx;
+      }
+    }
+    renderAll(true, flash);
+    clearTimeout(flow.timer);
+    flow.i = -1;
+    play();
+  }
+
+  function seed() {
+    for (const k of [...fs.__files.keys()]) fs.__files.delete(k);
+    db = makeDb();
+    db.collection('users').insertMany([
+      { name: 'Alice', age: 30, city: 'Cairo' },
+      { name: 'Bob', age: 25, city: 'Giza', tags: ['dev'] },
+      { name: 'Cara', age: 30, city: 'Giza' },
+    ]);
+    state.ops = [];
+    state.selFile = `${DIR}/users.bson`;
+    state.selDoc = 0;
+    state.viewBytes = null;
+    state.selStep = null;
+  }
+
+  /* ---------------- lessons ---------------- */
+  const LESSONS = [
+    { t: 'A document', code: "users.insertOne({ name: 'Dina', age: 28, city: 'Alexandria' })",
+      x: ['A <b>document</b> is a JavaScript object: field names and values. NoSQL databases store it as it is, with no table to fit into.', 'Run it, then follow the steps: youssefdb reads <code>users.bson</code>, decodes it into an array in memory, adds Dina, and writes the whole file back.'] },
+    { t: 'The _id key', code: "users.insertOne({ name: 'Omar' })",
+      x: ['Every document needs a unique key called <code>_id</code>. If you don’t give one, youssefdb creates an <b>ObjectId</b>.', 'Click Omar in Memory: you’ll see his 12-byte id split into a timestamp, a random part and a counter. In the Bytes panel it’s the orange block.'] },
+    { t: 'No fixed shape', code: "users.insertMany([\n  { name: 'Mona', skills: ['sql', 'node'] },\n  { name: 'Tarek', address: { city: 'Giza', zip: '12511' } }\n])",
+      x: ['Documents in one collection don’t need the same fields. Mona has an array, Tarek has a document inside a document.', 'In Bytes, find the type byte <code>04</code> (array) and <code>03</code> (embedded document): BSON stores nested data as documents inside documents.'] },
+    { t: 'How a value is saved', code: "users.insertOne({ n: 1, pi: 3.14, ok: true, nothing: null, when: new Date(0) })",
+      x: ['Each field becomes: a <b>type byte</b>, the <b>field name</b> ending in <code>00</code>, then the <b>value</b>.', 'Point at the bytes of this new document: a whole number takes 4 bytes, a decimal 8, true/false 1, and null takes none at all.'] },
+    { t: 'Reading', code: "users.find({ city: 'Giza' })",
+      x: ['To read, youssefdb loads the <b>whole file</b> into memory and checks every document against your query.', 'Matching documents are marked “returned” in Memory. Notice that reading never writes to disk.'] },
+    { t: 'Updating', code: "users.updateOne({ name: 'Alice' }, { $set: { age: 31 } })",
+      x: ['<code>$set</code> changes one field in memory. Then the <b>entire file</b> is encoded and saved again, even for one number.', 'The changed field is highlighted. Click the Read step and the Write step to compare the old and new bytes.'] },
+    { t: 'Deleting', code: "users.deleteMany({ city: 'Giza' })",
+      x: ['Deleting removes documents from the array in memory, then saves what is left.', 'Removed documents are shown crossed out. The file gets smaller.'] },
+    { t: 'Indexes', code: "users.createIndex('city')",
+      x: ['An <b>index</b> is a second file that maps each value to the positions of the documents that have it.', 'Click <code>users.index.bson</code> in Disk to see it. Then run <code>users.find({ city: \'Cairo\' })</code>: the steps show the index being read first.'] },
+    { t: 'Collections', code: "db.collection('orders').insertOne({ item: 'Laptop', price: 950 })",
+      x: ['A <b>collection</b> is a group of documents, and each one is its own file in the folder.', 'A new file, <code>orders.bson</code>, appears in Disk. Click between the files to switch what Memory and Bytes show.'] },
+  ];
+  let cur = 0;
+  function renderLessons() {
+    $('lessons').innerHTML = LESSONS.map((l, i) => `<li><button type="button" class="lesson" aria-current="${i === cur}" data-i="${i}"><span class="n">${i + 1}</span><span class="t">${l.t}</span></button></li>`).join('');
+    $('ltitle').textContent = `${cur + 1} · ${LESSONS[cur].t}`;
+    $('explain').innerHTML = LESSONS[cur].x.map((p) => `<p>${p}</p>`).join('');
+    $('code').value = LESSONS[cur].code;
+  }
+  $('lessons').addEventListener('click', (e) => { const b = e.target.closest('[data-i]'); if (b) { cur = +b.dataset.i; renderLessons(); $('code').focus(); } });
+  $('run').addEventListener('click', run);
+  $('code').addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); } });
+  $('reset').addEventListener('click', () => { seed(); $('result').textContent = 'Data reset to three example users.'; renderAll(false); });
+
+  seed();
+  renderLessons();
+  run();
+})();
+</script></body></html>
