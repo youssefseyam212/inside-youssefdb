@@ -59,7 +59,7 @@ code{font-family:var(--mono);font-size:.86em;background:var(--sunk);padding:0 va
 .lesson:hover{background:var(--bar)}
 .lesson[aria-current="true"]{background:var(--teal);color:var(--on-solid)}
 .lesson .n{font-family:var(--mono);font-size:var(--fs-xs);opacity:.75}
-.lesson .t{font-weight:500}
+.lesson .t{font-family:var(--mono);font-size:var(--fs-sm);font-weight:500}
 @media (max-width:720px){
   .lesson-list{flex-wrap:nowrap;overflow-x:auto;padding-bottom:var(--s-1);scroll-snap-type:x proximity}
   .lesson-list li{flex:0 0 auto;scroll-snap-align:start}

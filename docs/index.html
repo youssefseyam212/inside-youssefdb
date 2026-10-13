@@ -74,7 +74,7 @@ code{font-family:var(--mono);font-size:.86em;background:var(--sunk);padding:0 va
 .lesson:hover{background:var(--bar)}
 .lesson[aria-current="true"]{background:var(--teal);color:var(--on-solid)}
 .lesson .n{font-family:var(--mono);font-size:var(--fs-xs);opacity:.75}
-.lesson .t{font-weight:500}
+.lesson .t{font-family:var(--mono);font-size:var(--fs-sm);font-weight:500}
 @media (max-width:720px){
   .lesson-list{flex-wrap:nowrap;overflow-x:auto;padding-bottom:var(--s-1);scroll-snap-type:x proximity}
   .lesson-list li{flex:0 0 auto;scroll-snap-align:start}
@@ -1419,26 +1419,34 @@ var YDB=(()=>{var Ht=Object.defineProperty;var Ns=Object.getOwnPropertyDescripto
 
   /* ---------------- lessons ---------------- */
   const LESSONS = [
-    { t: 'A document', code: "const users = db.collection('users')\nusers.insertOne({ name: 'Dina', age: 28, city: 'Alexandria' })",
-      x: ['A <b>document</b> is a JavaScript object: field names and values. NoSQL databases store it as it is, with no table to fit into.', 'Run it, then follow the steps: youssefdb reads <code>users.bson</code>, decodes it into an array in memory, adds Dina, and writes the whole file back.'] },
-    { t: 'The _id key', code: "const users = db.collection('users')\nusers.insertOne({ name: 'Omar' })",
-      x: ['Every document needs a unique key called <code>_id</code>. If you don’t give one, youssefdb creates an <b>ObjectId</b>.', 'Click Omar in Memory: you’ll see his 12-byte id split into a timestamp, a random part and a counter. In the Bytes panel it’s the orange block.'] },
-    { t: 'No fixed shape', code: "const users = db.collection('users')\nusers.insertMany([\n  { name: 'Mona', skills: ['sql', 'node'] },\n  { name: 'Tarek', address: { city: 'Giza', zip: '12511' } }\n])",
-      x: ['Documents in one collection don’t need the same fields. Mona has an array, Tarek has a document inside a document.', 'In Bytes, find the type byte <code>04</code> (array) and <code>03</code> (embedded document): BSON stores nested data as documents inside documents.'] },
-    { t: 'How a value is saved', code: "const users = db.collection('users')\nusers.insertOne({ n: 1, pi: 3.14, ok: true, nothing: null, when: new Date(0) })",
-      x: ['Each field becomes: a <b>type byte</b>, the <b>field name</b> ending in <code>00</code>, then the <b>value</b>.', 'Point at the bytes of this new document: a whole number takes 4 bytes, a decimal 8, true/false 1, and null takes none at all.'] },
-    { t: 'Reading', code: "const users = db.collection('users')\nusers.find({ city: 'Giza' })",
-      x: ['To read, youssefdb loads the <b>whole file</b> into memory and checks every document against your query.', 'Press Play and watch Memory: each document is compared with the query in turn and marked as a match or not. With no index this is a <b>full scan</b>. Notice that reading never writes to disk.'] },
-    { t: 'Updating', code: "const users = db.collection('users')\nusers.updateOne({ name: 'Alice' }, { $set: { age: 31 } })",
-      x: ['<code>$set</code> changes one field in memory. Then the <b>entire file</b> is encoded and saved again, even for one number.', 'The changed field is highlighted. Click the Read step and the Write step to compare the old and new bytes.'] },
-    { t: 'Deleting', code: "const users = db.collection('users')\nusers.deleteMany({ city: 'Giza' })",
-      x: ['Deleting removes documents from the array in memory, then saves what is left.', 'Removed documents are shown crossed out. The file gets smaller.'] },
-    { t: 'Indexes', code: "const users = db.collection('users')\nusers.createIndex('city')",
-      x: ['An <b>index</b> is a second file that lists each value once, with the positions of the documents that have it, like the index at the back of a book.', 'Press Play to watch it being built one document at a time. Then click <code>users.index.bson</code> in Disk to see it.'] },
-    { t: 'Collections', code: "const orders = db.collection('orders')\norders.insertOne({ item: 'Laptop', price: 950 })",
-      x: ['A <b>collection</b> is a group of documents, and each one is its own file in the folder. <code>db.collection(\'orders\')</code> gives you the collection; save it in a variable, then call its methods.', 'A new file, <code>orders.bson</code>, appears in Disk. Click between the files to switch what Memory and Bytes show.'] },
-    { t: 'With vs without an index', code: "const shop = db.collection('shop')\nshop.drop()\nshop.insertMany([\n  { item: 'Pen', type: 'office' }, { item: 'Novel', type: 'book' },\n  { item: 'Mug', type: 'kitchen' }, { item: 'Atlas', type: 'book' },\n  { item: 'Lamp', type: 'home' }, { item: 'Stapler', type: 'office' }\n])\nshop.find({ type: 'book' })   // no index: checks all 6\nshop.createIndex('type')\nshop.find({ type: 'book' })   // with the index: checks only 2",
-      x: ['The same search runs twice: first with no index, then after <code>createIndex(\'type\')</code>.', 'Press Play. The first find checks all 6 documents one by one. The second looks up "book" in the index, gets positions #1 and #3, and goes straight there. The other four are skipped.'] },
+    { t: 'db.collection', code: "const orders = db.collection('orders')\norders.insertOne({ item: 'Laptop', price: 950 })",
+      x: ['<code>db.collection(\'orders\')</code> gives you a <b>collection</b>: a group of documents stored as one file. Save it in a variable, then call its methods.', 'Getting a collection doesn’t create anything. The file <code>orders.bson</code> appears in Disk only after the first write. Click between files to switch what Memory and Bytes show.'] },
+    { t: 'insertOne', code: "const users = db.collection('users')\nusers.insertOne({ name: 'Dina', age: 28, active: true, joined: new Date(0) })",
+      x: ['Adds one document. youssefdb reads the whole file, adds the document to the end of the array in memory, and writes the whole file back.', 'You didn’t give an <code>_id</code>, so youssefdb makes an <b>ObjectId</b>: 4 bytes of time, 5 random, 3 for a counter. In Bytes, each field is a type byte, the field name, then the value: a whole number takes 4 bytes, a date 8, true or false 1.'] },
+    { t: 'insertMany', code: "const users = db.collection('users')\nusers.insertMany([\n  { name: 'Mona', skills: ['sql', 'node'] },\n  { name: 'Tarek', address: { city: 'Giza', zip: '12511' } }\n])",
+      x: ['Adds several documents in one write. It is all or nothing: if one document is invalid or its <code>_id</code> already exists, none of them are saved.', 'Documents in one collection don’t need the same fields. Mona has an array, Tarek has a document inside a document. In Bytes, look for type <code>04</code> (array) and <code>03</code> (embedded document).'] },
+    { t: 'find', code: "const users = db.collection('users')\nusers.find({ city: 'Giza' })",
+      x: ['Returns every document that matches all the fields in the query. Matches are exact: <code>30</code> does not match <code>\'30\'</code>.', 'Press Play and watch Memory: with no index, each document is compared with the query in turn. This is a <b>full scan</b>. Reading never writes to disk.'] },
+    { t: 'findOne', code: "const users = db.collection('users')\nusers.findOne({ age: 30 })",
+      x: ['Returns the first matching document, or <code>null</code> if nothing matches.', 'It runs the same search as <code>find</code> and keeps only the first result, so it still checks every document.'] },
+    { t: 'countDocuments', code: "const users = db.collection('users')\nusers.countDocuments({ city: 'Giza' })",
+      x: ['Returns how many documents match, as a number.', 'It runs the same search as <code>find</code>, so an index on the queried field speeds it up too.'] },
+    { t: 'updateOne', code: "const users = db.collection('users')\nusers.updateOne({ name: 'Alice' }, { $set: { age: 31 } })",
+      x: ['Changes the first matching document. <code>$set</code> sets fields, and it is the only update operator youssefdb supports.', 'It checks documents in order and stops at the first match. Then the whole file is saved again, even for one number. If nothing actually changes, nothing is written.'] },
+    { t: 'updateMany', code: "const users = db.collection('users')\nusers.updateMany({ city: 'Giza' }, { $set: { country: 'Egypt' } })",
+      x: ['Changes every matching document.', 'Every document is checked. The result tells you how many matched and how many actually changed.'] },
+    { t: 'deleteOne', code: "const users = db.collection('users')\nusers.deleteOne({ city: 'Giza' })",
+      x: ['Removes the first matching document.', 'It stops at the first match. The documents after it move up one position in the array.'] },
+    { t: 'deleteMany', code: "const users = db.collection('users')\nusers.deleteMany({ city: 'Giza' })",
+      x: ['Removes every matching document. A filter is required: pass <code>{}</code> to delete everything.', 'Removed documents are shown crossed out, and the file gets smaller.'] },
+    { t: 'createIndex', code: "const shop = db.collection('shop')\nshop.drop()\nshop.insertMany([\n  { item: 'Pen', type: 'office' }, { item: 'Novel', type: 'book' },\n  { item: 'Mug', type: 'kitchen' }, { item: 'Atlas', type: 'book' },\n  { item: 'Lamp', type: 'home' }, { item: 'Stapler', type: 'office' }\n])\nshop.find({ type: 'book' })   // no index: checks all 6\nshop.createIndex('type')\nshop.find({ type: 'book' })   // with the index: checks only 2",
+      x: ['Builds an <b>index</b>: a second file that lists each value once, with the positions of the documents that have it. Press Play to watch it being built one document at a time.', 'The same search runs twice. The first find checks all 6 documents. After <code>createIndex(\'type\')</code>, the second looks up "book" in the index and goes straight to #1 and #3.'] },
+    { t: 'listIndexes', code: "const users = db.collection('users')\nusers.createIndex('city')\nusers.listIndexes()",
+      x: ['Returns the indexes on a collection, for example <code>{ name: \'city_1\', field: \'city\' }</code>.', '<code>listIndexes</code> only reads <code>users.index.bson</code>. The documents themselves are not loaded.'] },
+    { t: 'dropIndex', code: "const users = db.collection('users')\nusers.createIndex('city')\nusers.dropIndex('city')",
+      x: ['Removes an index. You can pass the field name (<code>\'city\'</code>) or the index name (<code>\'city_1\'</code>).', 'When the last index is removed, the file <code>users.index.bson</code> is deleted, and searches go back to checking every document.'] },
+    { t: 'drop', code: "const temp = db.collection('temp')\ntemp.insertOne({ note: 'scratch' })\ntemp.drop()",
+      x: ['Deletes a whole collection: its data file and its index file.', 'Watch Disk: <code>temp.bson</code> is created, then deleted. The other collections are not touched.'] },
   ];
   let cur = 0;
   function renderLessons() {
